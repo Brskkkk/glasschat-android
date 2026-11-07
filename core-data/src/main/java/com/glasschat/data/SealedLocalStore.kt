@@ -670,6 +670,6 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
         private const val MAX_ENVELOPE_BYTES = 1024 * 1024
         private const val MAX_RELAY_RETENTION_MS = 7L * 24 * 60 * 60 * 1000
         private const val MAX_INVITATION_LIFETIME_MS = 30L * 24 * 60 * 60 * 1000
-        private val ALLOWED_KINDS = setOf("conversation", "message", "contact", "draft", "setting", "reaction", "saved", "relay_delivery", "account", "invitation", "device", "admin_audit")
+        private val ALLOWED_KINDS = setOf("conversation", "message", "contact", "draft", "setting", "reaction", "saved", "relay_delivery", "account", "invitation", "device", "admin_audit", "signal_state")
     }
 }

@@ -70,8 +70,18 @@ class SignalSessionCrypto(private val protocolStore: SignalProtocolStore) {
         }
         val local = address(localAccountId, localSignalDeviceId)
         val remote = address(remoteAccountId, remoteSignalDeviceId)
-        val message = SessionCipher(protocolStore, local, remote).encrypt(plaintext.copyOf())
-        return SignalCiphertextEnvelope(message.type, message.serialize())
+        val plaintextCopy = plaintext.copyOf()
+        try {
+            val message = SessionCipher(protocolStore, local, remote).encrypt(plaintextCopy)
+            val serialized = message.serialize()
+            try {
+                return SignalCiphertextEnvelope(message.type, serialized)
+            } finally {
+                serialized.fill(0)
+            }
+        } finally {
+            plaintextCopy.fill(0)
+        }
     }
 
     @Synchronized
@@ -86,10 +96,14 @@ class SignalSessionCrypto(private val protocolStore: SignalProtocolStore) {
         val remote = address(remoteAccountId, remoteSignalDeviceId)
         val cipher = SessionCipher(protocolStore, local, remote)
         val serialized = envelope.serializedMessage
-        return when (envelope.type) {
-            CiphertextMessage.PREKEY_TYPE -> cipher.decrypt(PreKeySignalMessage(serialized))
-            CiphertextMessage.WHISPER_TYPE -> cipher.decrypt(SignalMessage(serialized))
-            else -> error("Unsupported Signal ciphertext type")
+        try {
+            return when (envelope.type) {
+                CiphertextMessage.PREKEY_TYPE -> cipher.decrypt(PreKeySignalMessage(serialized))
+                CiphertextMessage.WHISPER_TYPE -> cipher.decrypt(SignalMessage(serialized))
+                else -> error("Unsupported Signal ciphertext type")
+            }
+        } finally {
+            serialized.fill(0)
         }
     }
 
