@@ -22,6 +22,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.text.BasicText
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -77,6 +79,7 @@ fun LocalMessengerScreen(
     var newInviteCode by remember { mutableStateOf("") }
     var revokeInviteInput by remember { mutableStateOf("") }
     var secureState by remember { mutableStateOf("Not configured — local-only; no message leaves this device.") }
+    var privateMessageAlertsEnabled by remember { mutableStateOf(SecureMessageNotifications.isEnabled(appContext)) }
     var projectEndpoint by remember { mutableStateOf("") }
     var projectAnonKey by remember { mutableStateOf("") }
     var authEmail by remember { mutableStateOf("") }
@@ -96,6 +99,17 @@ fun LocalMessengerScreen(
     val baseTheme = glassTheme(themeId)
     val customAccent = parseThemeColor(customAccentHex)
     val theme = if (customAccent == null) baseTheme else baseTheme.copy(accent = customAccent, swatch = customAccent)
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            SecureMessageNotifications.enable(appContext)
+            privateMessageAlertsEnabled = true
+            notice = "Generic private-message alerts are on. Android may delay polling."
+        } else {
+            notice = "Notifications remain off. You can enable them in Android Settings."
+        }
+    }
 
     fun refreshContacts() {
         executor.execute {
@@ -225,6 +239,27 @@ fun LocalMessengerScreen(
                     secureState + if (hasVerifiedPeer) " A verified Signal session is configured; each send still reports whether the relay accepted ciphertext." else " No verified peer session is ready; local saves stay on this device.",
                     Color(0xFFE8E9F0), 14
                 )
+            }
+            Panel {
+                ChatText("PRIVATE-MESSAGE ALERTS", Color.White, 16, FontWeight.SemiBold)
+                Spacer(Modifier.height(5.dp))
+                ChatText("Optional generic alerts when encrypted messages are saved here. No sender or message text is shown. Delivery depends on Android’s best-effort polling, not instant push.", Color(0xFFBFC4D0), 12)
+                Spacer(Modifier.height(8.dp))
+                SmallAction(if (privateMessageAlertsEnabled) "Turn off private-message alerts" else "Enable private-message alerts", {
+                    if (privateMessageAlertsEnabled) {
+                        SecureMessageNotifications.disable(appContext)
+                        privateMessageAlertsEnabled = false
+                        notice = "Private-message alerts are off."
+                    } else if (android.os.Build.VERSION.SDK_INT >= 33 &&
+                        androidx.core.content.ContextCompat.checkSelfPermission(appContext, android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
+                    ) {
+                        notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                    } else {
+                        SecureMessageNotifications.enable(appContext)
+                        privateMessageAlertsEnabled = true
+                        notice = "Generic private-message alerts are on. Android may delay polling."
+                    }
+                }, secondary = privateMessageAlertsEnabled)
             }
             Panel {
                 ChatText("SECURE ACCOUNT + DEVICE SETUP", Color.White, 16, FontWeight.SemiBold)

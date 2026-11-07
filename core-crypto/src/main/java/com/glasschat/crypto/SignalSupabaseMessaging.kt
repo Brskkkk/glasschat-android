@@ -27,7 +27,10 @@ enum class SendState {
 }
 
 data class SecureReceiveResult(
+    /** Valid deliveries persisted locally, including safe duplicate retries. */
     val stored: Int,
+    /** Newly created local message rows; suitable for one generic incoming notification. */
+    val newlyStored: Int,
     val acknowledged: Int,
     val skipped: Int,
     val failures: List<String>
@@ -204,6 +207,7 @@ class SignalSupabaseMessaging(
     ): SecureReceiveResult {
         val rows = relay.fetchCiphertext(accessToken(), localTransportDeviceId, limit)
         var stored = 0
+        var newlyStored = 0
         var acknowledged = 0
         var skipped = 0
         val failures = ArrayList<String>()
@@ -222,7 +226,7 @@ class SignalSupabaseMessaging(
             try {
                 val expiry = Instant.parse(row.getString("expires_at")).toEpochMilli()
                 ciphertext = relay.decodePgBytea(row.getString("ciphertext"))
-                val messageId = pipeline.decryptAndStore(
+                val storedMessage = pipeline.decryptAndStore(
                     CiphertextDelivery(deliveryId, senderDeviceId, recipientDeviceId, ciphertext, expiry),
                     authenticatedLocalTransportDeviceId = localTransportDeviceId,
                     authenticatedSenderTransportDeviceId = senderDeviceId,
@@ -233,8 +237,9 @@ class SignalSupabaseMessaging(
                     conversationId = peer.conversationId,
                     receivedAt = now
                 )
-                check(messageId == deliveryId) { "Stored message ID does not match relay delivery" }
+                check(storedMessage.deliveryId == deliveryId) { "Stored message ID does not match relay delivery" }
                 stored++
+                if (storedMessage.newlyStored) newlyStored++
                 if (relay.acknowledgeCiphertext(accessToken(), deliveryId, localTransportDeviceId)) {
                     acknowledged++
                 } else {
@@ -248,7 +253,7 @@ class SignalSupabaseMessaging(
                 clearJsonCiphertext(row)
             }
         }
-        return SecureReceiveResult(stored, acknowledged, skipped, failures)
+        return SecureReceiveResult(stored, newlyStored, acknowledged, skipped, failures)
     }
 
     private fun submit(deliveryId: String, recipientDeviceId: String, ciphertext: ByteArray, expiresAt: Long) {

@@ -75,6 +75,9 @@ data class QueuedSignalDelivery(
 /** Minimal status metadata returned by the authenticated relay; never includes message content. */
 data class RelayDeliveryReceipt(val recipientDeviceId: String, val status: String, val recordedAt: Long?)
 
+/** Indicates whether this authenticated delivery created a new local message or was an idempotent retry. */
+data class DecryptedStoreResult(val deliveryId: String, val newlyStored: Boolean)
+
 /**
  * Local E2EE message boundary shared by Owner and Client builds. Outbound text is encrypted with
  * an already-established, identity-pinned Signal session before any record is written. The local
@@ -266,7 +269,7 @@ class SignalMessagePipeline(
         senderSignalDeviceId: Int,
         conversationId: String,
         receivedAt: Long = System.currentTimeMillis()
-    ): String {
+    ): DecryptedStoreResult {
         require(delivery.deliveryId.isNotBlank() && delivery.deliveryId.length <= 100)
         require(authenticatedLocalTransportDeviceId.isNotBlank() && authenticatedLocalTransportDeviceId.length <= 200)
         require(authenticatedSenderTransportDeviceId.isNotBlank() && authenticatedSenderTransportDeviceId.length <= 200)
@@ -292,7 +295,7 @@ class SignalMessagePipeline(
                     existing.optString("ciphertextSha256") == ciphertextDigestBase64) {
                     "Delivery ID already belongs to different encrypted content"
                 }
-                return@inTransaction delivery.deliveryId
+                return@inTransaction DecryptedStoreResult(delivery.deliveryId, newlyStored = false)
             }
 
             val envelope = SignalCiphertextEnvelopeCodec.decode(delivery.ciphertext)
@@ -321,7 +324,7 @@ class SignalMessagePipeline(
                     .put("delivery", RECEIVED_DELIVERY)
                     .put("ciphertextSha256", ciphertextDigestBase64)
                 localStore.put("message", delivery.deliveryId, message, conversationId, receivedAt)
-                delivery.deliveryId
+                DecryptedStoreResult(delivery.deliveryId, newlyStored = true)
             } finally {
                 plaintext.fill(0)
             }

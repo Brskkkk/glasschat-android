@@ -24,7 +24,8 @@ class SecureSyncWorker(context: Context, params: WorkerParameters) : Worker(cont
         return try {
             val runtime = GlassChatSecureRuntime(store)
             runtime.retryQueued()
-            runtime.receive()
+            val newlyStored = runtime.receiveForBackground()
+            SecureMessageNotifications.showNewMessages(applicationContext, newlyStored)
             runtime.refreshDeliveryStatuses()
             Result.success()
         } catch (_: Exception) {

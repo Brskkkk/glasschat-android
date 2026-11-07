@@ -296,12 +296,20 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
 
     @Synchronized
     fun receive(): String {
+        val result = receiveVerifiedMessages()
+        return "Received ${result.stored} (${result.newlyStored} new); relay acknowledgments ${result.acknowledged}; skipped ${result.skipped}." +
+            if (result.failures.isEmpty()) "" else " ${result.failures.size} delivery issue(s) remain unacknowledged."
+    }
+
+    /** New-message count for generic local notifications; never includes duplicate retries. */
+    @Synchronized
+    fun receiveForBackground(): Int = receiveVerifiedMessages().newlyStored
+
+    private fun receiveVerifiedMessages(): SecureReceiveResult {
         val own = requireAccount(); val local = requireLocalDevice(own.getString("id"))
         val peers = verifiedPeers()
         check(peers.isNotEmpty()) { "No verified peer sessions are configured" }
-        val result = messaging(own.getString("id"), local).receivePending(peers)
-        return "Received ${result.stored}; relay acknowledgments ${result.acknowledged}; skipped ${result.skipped}." +
-            if (result.failures.isEmpty()) "" else " ${result.failures.size} delivery issue(s) remain unacknowledged."
+        return messaging(own.getString("id"), local).receivePending(peers)
     }
 
     @Synchronized
