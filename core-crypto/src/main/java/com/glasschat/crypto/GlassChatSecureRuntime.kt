@@ -147,10 +147,43 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
                 finally { keys.forEach { it.second.fill(0) } }
                 store.put("device", publicationId, JSONObject().put("state", "published"))
             }
+            replenishOneTimePreKeys(client, token, accountId, transportId, signalDeviceId, protocol)
             store.put("device", deviceRecordId(accountId), localRecord.put("registered", true)
                 .put("registrationId", public.registrationId).put("identityFingerprint", fingerprint(identity)))
             return "This device is registered and its public Signal keys are published. Private keys remain on this device."
         } finally { identity.fill(0) }
+    }
+
+    private fun replenishOneTimePreKeys(
+        client: SupabaseRelayClient,
+        token: String,
+        accountId: String,
+        transportId: String,
+        signalDeviceId: Int,
+        protocol: SealedSignalProtocolStore
+    ) {
+        val currentCount = client.countOwnOneTimePreKeys(token, transportId)
+        if (currentCount >= ONE_TIME_PREKEY_LOW_WATER) return
+        val needed = ONE_TIME_PREKEY_TARGET - currentCount
+        check(needed in 1..ONE_TIME_PREKEY_TARGET) {
+            "Server one-time prekey count is outside the safe replenishment range"
+        }
+        val generated = protocol.provisionAdditionalOneTimePreKeys(signalDeviceId, needed)
+        val upload = generated.map { material ->
+            val bytes = material.publicKey
+            try { material.id to bytes.copyOf() } finally { bytes.fill(0) }
+        }
+        try {
+            client.publishOneTimePreKeys(token, accountId, transportId, upload)
+        } catch (e: Exception) {
+            // IDs were durably burned before this request. A retry first counts server keys and
+            // allocates a new range if needed; it never republishes this possibly accepted batch.
+            throw IllegalStateException(
+                "Signal prekey replenishment may have reached the server; those IDs will not be reused. ${e.message ?: "Check the next device setup sync."}", e
+            )
+        } finally {
+            upload.forEach { it.second.fill(0) }
+        }
     }
 
     /** Records this account's consent side. The peer must separately approve before keys are visible. */
@@ -389,6 +422,8 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
         const val ACCOUNT = "supabase_account"
         const val SESSION = "supabase_session"
         const val INVITATION_LIFETIME_MS = 7L * 24 * 60 * 60 * 1000
+        const val ONE_TIME_PREKEY_TARGET = 100
+        const val ONE_TIME_PREKEY_LOW_WATER = 20
         const val TOKEN_REFRESH_MARGIN_MS = 60_000L
     }
 }

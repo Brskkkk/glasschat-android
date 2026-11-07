@@ -143,6 +143,46 @@ class SealedSignalProtocolStore(
         }
     }
 
+    /**
+     * Create and persist a fresh batch whose IDs can never overlap an earlier upload attempt.
+     * The encrypted high-water mark is advanced before private key writes are returned for upload;
+     * a crash or uncertain network result can burn IDs but cannot cause their reuse.
+     */
+    fun provisionAdditionalOneTimePreKeys(signalDeviceId: Int, count: Int): List<SignalPublicKeyMaterial> = synchronized(lock) {
+        require(signalDeviceId in MIN_SIGNAL_DEVICE_ID..MAX_SIGNAL_DEVICE_ID)
+        require(count in 1..MAX_ONE_TIME_PREKEY_BATCH)
+        val readyRecord = localStore.get(RECORD_KIND, rowId(INITIAL_KEYS_READY, SINGLETON_KEY))
+            ?: error("Local Signal identity and prekeys are not provisioned")
+        val ready = decodePayload(readyRecord, INITIAL_KEYS_READY, SINGLETON_KEY)
+        check(ready.optInt("deviceId") == signalDeviceId) { "Signal identity is bound to a different device ID" }
+
+        val sequenceRecord = localStore.get(RECORD_KIND, rowId(ONE_TIME_PREKEY_SEQUENCE, SINGLETON_KEY))
+        val highWater = if (sequenceRecord == null) {
+            INITIAL_ONE_TIME_PREKEY_COUNT
+        } else {
+            val sequence = decodePayload(sequenceRecord, ONE_TIME_PREKEY_SEQUENCE, SINGLETON_KEY)
+            check(sequence.optInt("deviceId") == signalDeviceId) { "Pre-key sequence belongs to a different device" }
+            sequence.getInt("highWatermark")
+        }
+        check(highWater >= INITIAL_ONE_TIME_PREKEY_COUNT && highWater <= Int.MAX_VALUE - count) {
+            "Signal one-time pre-key ID space is exhausted or its saved sequence is invalid"
+        }
+        val firstId = highWater + 1
+        val lastId = highWater + count
+        writeJson(ONE_TIME_PREKEY_SEQUENCE, SINGLETON_KEY, JSONObject()
+            .put("deviceId", signalDeviceId).put("highWatermark", lastId))
+
+        for (id in firstId..lastId) {
+            check(!containsPreKey(id)) { "Refusing to reuse an existing Signal pre-key ID" }
+            val pair = ECKeyPair.generate()
+            storePreKey(id, PreKeyRecord(id, pair))
+        }
+        (firstId..lastId).map { id ->
+            val public = loadPreKey(id).keyPair.publicKey.serialize()
+            try { SignalPublicKeyMaterial(id, public) } finally { public.fill(0) }
+        }
+    }
+
     /** Fail closed unless this store is provisioned for the authenticated local account/device. */
     fun requireProvisionedIdentity(accountId: String, signalDeviceId: Int) = synchronized(lock) {
         require(accountId.isNotBlank() && accountId.length <= 128) { "Invalid local account identifier" }
@@ -535,6 +575,8 @@ class SealedSignalProtocolStore(
         const val IDENTITY_PAIR = "identity_pair"
         const val INITIAL_KEYS_READY = "initial_keys_ready"
         const val INITIAL_ONE_TIME_PREKEY_COUNT = 100
+        const val MAX_ONE_TIME_PREKEY_BATCH = 100
+        const val ONE_TIME_PREKEY_SEQUENCE = "one_time_prekey_sequence"
         const val INITIAL_SIGNED_PREKEY_ID = 1
         const val INITIAL_KYBER_PREKEY_ID = 1
         const val MIN_SIGNAL_DEVICE_ID = 1

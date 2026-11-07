@@ -111,6 +111,14 @@ class SupabaseRelayClient(baseUrl: String, anonKey: String) {
             mapOf("Prefer" to "resolution=merge-duplicates,return=minimal"))
     }
 
+    /** Count unconsumed public one-time prekeys for the authenticated owner's active device. */
+    fun countOwnOneTimePreKeys(token: String, deviceId: String): Int {
+        requireUuid(deviceId)
+        val result = rpc(token, "gc_count_own_one_time_prekeys", JSONObject().put("p_device_id", deviceId))
+        return (result as? Number)?.toInt()?.also { require(it >= 0) }
+            ?: error("Supabase returned an invalid one-time prekey count")
+    }
+
     fun publishOneTimePreKeys(token: String, accountId: String, deviceId: String,
                               keys: List<Pair<Int, ByteArray>>) {
         requireUuid(accountId); requireUuid(deviceId)

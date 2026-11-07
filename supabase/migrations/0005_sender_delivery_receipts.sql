@@ -15,9 +15,10 @@ create index if not exists gc_delivery_receipts_sender_time_idx
 alter table public.gc_delivery_receipts enable row level security;
 revoke all on public.gc_delivery_receipts from anon, authenticated;
 
--- A fetch or status refresh performs expiry cleanup, preserving a short metadata-only tombstone
--- so the sender can distinguish recipient storage from expiration. Tombstones are purged after
--- 30 days; no scheduler/pg_cron extension is required or assumed.
+-- A fetch or status refresh performs expiry cleanup, preserving a metadata-only tombstone so
+-- the sender can distinguish recipient storage from expiration. Tombstones become eligible for
+-- purge after 30 days, but cleanup runs only when an authenticated expiry/fetch/status RPC runs;
+-- during inactivity they may remain longer. No scheduler/pg_cron extension is configured.
 create or replace function public.gc_expire_ciphertext()
 returns integer
 language plpgsql
@@ -144,5 +145,5 @@ $$;
 
 revoke all on function public.gc_fetch_delivery_status(uuid, uuid[]) from public, anon;
 grant execute on function public.gc_fetch_delivery_status(uuid, uuid[]) to authenticated;
-comment on table public.gc_delivery_receipts is 'Metadata-only per-device ciphertext delivery receipts retained for at most 30 days; no message payload.';
+comment on table public.gc_delivery_receipts is 'Metadata-only per-device ciphertext delivery receipts; rows become eligible for deletion after 30 days and are purged on the next expiry/fetch/status RPC, so inactivity may extend retention. No message payload.';
 comment on function public.gc_fetch_delivery_status(uuid, uuid[]) is 'Returns only the authenticated sender device’s pending, durably acknowledged, or expired delivery metadata for supplied IDs.';
