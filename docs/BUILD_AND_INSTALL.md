@@ -12,11 +12,11 @@ This guide describes the GlassChat Owner and GlassChat Client preview source and
 
 The private GitHub prerelease [`v0.1.0-preview.1`](https://github.com/Brskkkk/glasschat-android/releases/tag/v0.1.0-preview.1) contains `glasschat-owner-debug.apk` and `app-client-debug.apk`. Download them only while signed into an account authorized to view the private repository. Both are arm64-v8a-only; they will not install on x86/x86_64 or 32-bit ARM devices. On the Android device, open each APK and allow installation from that source if Android asks. Android may show an unknown-source warning because these are debug-signed builds. The Owner and Client APKs can coexist.
 
-Both APKs were successfully assembled and their package IDs and v2 signatures checked. The Client build logged D8 warnings while rewriting Kotlin metadata, although Gradle completed successfully. After publishing this preview, the source toolchain was upgraded to AGP 8.10.1 / Gradle 8.11.1, which meets Kotlin 2.2’s documented D8/R8 requirement. That source change has not been rebuilt, so the published APK still has the warning; treat it as a preview and do not assume runtime stability. Each APK is approximately 194 MB. SHA-256: Owner `ef82d0b032543b8c371ab63a29ea461016d6991d2e781b1b6f41934c9ce82bc2`; Client `c92423626b39a4ed5f09d5a90f1b83e1ae8812e5ac32cf5dcbc82ccfb44e4ad3`. These are debug builds signed with Gradle's debug key. They are not production release-signed. Do not use them as a secure production service, and do not expect a future release-key build to update them seamlessly.
+Both APKs were successfully assembled and their package IDs and v2 signatures checked. The Client build logged D8 warnings while rewriting Kotlin metadata, although Gradle completed successfully. After publishing this preview, the source toolchain was upgraded to AGP 8.10.1 / Gradle 8.11.1, which meets Kotlin 2.2’s documented D8/R8 requirement. With the updated source, both apps’ Kotlin compile tasks and seven focused Signal-envelope unit tests pass; APK packaging was not rerun because build storage is low, so the published APKs still have the earlier warning. Treat them as previews and do not assume runtime stability. Each APK is approximately 194 MB. SHA-256: Owner `ef82d0b032543b8c371ab63a29ea461016d6991d2e781b1b6f41934c9ce82bc2`; Client `c92423626b39a4ed5f09d5a90f1b83e1ae8812e5ac32cf5dcbc82ccfb44e4ad3`. These are debug builds signed with Gradle's debug key. They are not production release-signed. Do not use them as a secure production service, and do not expect a future release-key build to update them seamlessly.
 
 ## Build from source
 
-Requirements: JDK 17, Android SDK platform/build tools for API 35, and network access for Gradle/Maven dependencies. Source uses Android Gradle Plugin 8.10.1, Gradle 8.11.1 and Kotlin 2.2.20; this combination was set after the preview build to meet Kotlin 2.2’s documented R8 requirement, and still needs a fresh build verification. From the repository root:
+Requirements: JDK 17, Android SDK platform/build tools for API 35, and network access for Gradle/Maven dependencies. Source uses Android Gradle Plugin 8.10.1, Gradle 8.11.1 and Kotlin 2.2.20; this combination was source-validated by successful Owner/Client Kotlin compilation and focused unit tests; a complete packaging pass on the updated toolchain is still pending. From the repository root:
 
 ```sh
 ./gradlew --no-daemon :app-owner:assembleDebug :app-client:assembleDebug
@@ -29,13 +29,13 @@ app-owner/build/outputs/apk/debug/app-owner-debug.apk
 app-client/build/outputs/apk/debug/app-client-debug.apk
 ```
 
-To run the repository's unit-test tasks (there may be no test source sets yet):
+To run the repository's unit tests (currently seven focused Signal ciphertext-envelope codec tests):
 
 ```sh
 ./gradlew --no-daemon test
 ```
 
-The Owner and Client debug APKs were assembled separately and verified as package `com.glasschat.owner` / `com.glasschat.client`, version `0.1.0`, with the Android debug certificate. No unit/integration tests, emulator/device launch, live server, security review or cryptographic interoperability checks were run. The Client packaging emitted D8 Kotlin metadata rewrite warnings. Do not treat a successful build as verification of the server or cryptographic interoperability. Current delivery is debug APKs only; production signing and reproducible release signing are not configured.
+The Owner and Client debug APKs were assembled separately and verified as package `com.glasschat.owner` / `com.glasschat.client`, version `0.1.0`, with the Android debug certificate. Seven focused unit tests pass, and Owner/Client Kotlin compilation passes on the updated toolchain. No emulator/device launch, live server, full integration, security audit or cryptographic interoperability checks were run. The published Client APK emitted D8 Kotlin metadata rewrite warnings; updated-toolchain packaging has not been rerun. Do not treat a successful build as verification of the server or cryptographic interoperability. Current delivery is debug APKs only; production signing and reproducible release signing are not configured.
 
 ## Live Supabase setup required
 
