@@ -69,6 +69,11 @@ fun LocalMessengerScreen(
     var contactInput by remember { mutableStateOf("") }
     var groupMode by remember { mutableStateOf(false) }
     var groupIdInput by remember { mutableStateOf("") }
+    var serverGroupInviteInput by remember { mutableStateOf("") }
+    var serverGroupInviteCode by remember { mutableStateOf("") }
+    var serverGroupInviteGroupId by remember { mutableStateOf("") }
+    val serverGroupRoster = remember { mutableStateListOf<JSONObject>() }
+    var serverGroupRosterId by remember { mutableStateOf("") }
     var messageInput by remember { mutableStateOf("") }
     var editingMessageId by remember { mutableStateOf<String?>(null) }
     var searchInput by remember { mutableStateOf("") }
@@ -339,6 +344,32 @@ fun LocalMessengerScreen(
                 accountSummary?.let { account ->
                     Spacer(Modifier.height(7.dp))
                     ChatText("Account: ${account.optString("username")} · ${account.optString("role")} · ${account.optString("id")}", Color(0xFFE8E9F0), 11)
+                }
+                Spacer(Modifier.height(8.dp))
+                ChatText("SERVER-MANAGED GROUPS", Color.White, 13, FontWeight.SemiBold)
+                ChatText("Server roster and invite codes require migration 0008. The relay enforces membership; each member still needs contact approval and device fingerprint verification before messages can be sent.", Color(0xFFBFC4D0), 11)
+                Spacer(Modifier.height(6.dp))
+                SmallAction("Refresh my server groups") {
+                    executor.execute {
+                        try {
+                            val groups = secureRuntime.listServerGroups()
+                            main.post { notice = "Refreshed ${groups.size} server group(s)."; refreshChats() }
+                        } catch (e: Exception) { main.post { notice = "Could not refresh server groups; confirm sign-in and migration 0008. ${e.message ?: "request failed"}" } }
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+                ChatText("Join a group using its one-time code.", Color(0xFFBFC4D0), 11)
+                Spacer(Modifier.height(6.dp)); Entry(serverGroupInviteInput, { serverGroupInviteInput = it }, "48-character group invitation code")
+                Spacer(Modifier.height(6.dp))
+                SmallAction("Redeem group invitation") {
+                    val code = serverGroupInviteInput.trim()
+                    executor.execute {
+                        try {
+                            val joined = secureRuntime.redeemServerGroupInvitation(code)
+                            val groupId = joined.getString("groupId")
+                            main.post { serverGroupInviteInput = ""; notice = "Joined server-managed group ${joined.getString("groupName")}. Add and verify each member’s active devices before sending."; refreshChats(groupId) }
+                        } catch (e: Exception) { main.post { notice = "Could not join the group: ${e.message ?: "check the code and current account"}" } }
+                    }
                 }
                 Spacer(Modifier.height(8.dp))
                 if (owner) {
@@ -682,9 +713,9 @@ fun LocalMessengerScreen(
                 Entry(titleInput, { titleInput = it }, if (groupMode) "Group name" else "Conversation name")
                 Spacer(Modifier.height(8.dp))
                 if (groupMode) {
-                    Entry(groupIdInput, { groupIdInput = it.trim() }, "Shared group ID (optional; generated if blank)")
+                    Entry(groupIdInput, { groupIdInput = it.trim() }, "Local group UUID (optional; generated if blank)")
                     Spacer(Modifier.height(5.dp))
-                    ChatText("Use the same ID on each member’s device, then add and verify each member’s devices in this conversation. Membership is managed locally; there’s no shared roster yet.", Color(0xFFBFC4D0), 11)
+                    ChatText("This creates a local-only group. For a shared server roster, create a server-managed group below instead.", Color(0xFFBFC4D0), 11)
                     if (groupIdInput.isNotBlank()) {
                         Spacer(Modifier.height(6.dp))
                         SmallAction("Copy group ID") {
@@ -696,7 +727,7 @@ fun LocalMessengerScreen(
                     Entry(contactInput, { contactInput = it }, "Contact's GlassChat ID (stored locally only)")
                 }
                 Spacer(Modifier.height(8.dp))
-                SmallAction(if (groupMode) "Create local group" else "Save contact and start local conversation") {
+                SmallAction(if (groupMode) "Create local-only group" else "Save contact and start local conversation") {
                     val label = titleInput.trim().ifBlank { if (groupMode) "" else contactInput.trim() }
                     val suppliedGroupId = groupIdInput.trim()
                     val parsedGroupId = if (groupMode && suppliedGroupId.isNotBlank()) {
@@ -774,6 +805,19 @@ fun LocalMessengerScreen(
                         }
                     }
                 }
+                if (groupMode) {
+                    Spacer(Modifier.height(7.dp))
+                    SmallAction("Create server-managed group") {
+                        val name = titleInput.trim()
+                        if (name.isBlank()) notice = "Enter a group name first."
+                        else executor.execute {
+                            try {
+                                val id = secureRuntime.createServerGroup(name)
+                                main.post { titleInput = ""; groupIdInput = id; notice = "Server-managed group created. Invite members, then refresh the roster and verify each member’s devices."; refreshChats(id) }
+                            } catch (e: Exception) { main.post { notice = "Could not create the server group: ${e.message ?: "sign in and register this device first"}" } }
+                        }
+                    }
+                }
             }
             Panel {
                 ChatText("CONVERSATIONS", Color.White, 16, FontWeight.SemiBold)
@@ -791,17 +835,50 @@ fun LocalMessengerScreen(
                 ChatText(selectedName, Color.White, 17, FontWeight.SemiBold)
                 if (selectedConversation?.optString("kind") == "group") {
                     val groupId = selectedConversation.optString("id")
+                    val serverManaged = selectedConversation.optBoolean("serverManaged")
                     Spacer(Modifier.height(5.dp))
-                    ChatText("LOCAL GROUP · PAIRWISE ENCRYPTED PER VERIFIED DEVICE", theme.accent, 11, FontWeight.SemiBold)
+                    ChatText(if (serverManaged) "SERVER-MANAGED MEMBERSHIP · PAIRWISE SIGNAL" else "LOCAL GROUP · PAIRWISE SIGNAL", theme.accent, 11, FontWeight.SemiBold)
                     ChatText("Group ID: $groupId", Color(0xFFBFC4D0), 11)
                     Spacer(Modifier.height(5.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                         SmallAction("Copy group ID") {
                             clipboard.setPrimaryClip(ClipData.newPlainText("GlassChat group ID", groupId))
-                            notice = "Copied group ID. Members need the same ID and individually verified peer devices."
+                            notice = if (serverManaged) "Copied server group ID. Share a one-time invitation code to add members." else "Copied local group ID. Members need the same ID and individually verified peer devices."
+                        }
+                        if (serverManaged && selectedConversation.optString("role") == "owner") SmallAction("Create one-time invite") {
+                            executor.execute {
+                                try {
+                                    val code = secureRuntime.createServerGroupInvitation(groupId)
+                                    main.post { serverGroupInviteCode = code; serverGroupInviteGroupId = groupId; notice = "Group invitation created; copy and share it privately. It expires in seven days." }
+                                } catch (e: Exception) { main.post { notice = "Could not create group invitation: ${e.message ?: "group owner access is required"}" } }
+                            }
                         }
                     }
-                    ChatText("There’s no shared roster or Sender-Key group ratchet yet. Each message is encrypted separately to the verified devices linked to this ID.", Color(0xFFBFC4D0), 11)
+                    if (serverManaged && serverGroupInviteGroupId == groupId && serverGroupInviteCode.isNotBlank()) {
+                        Spacer(Modifier.height(5.dp)); ChatText("One-time group code: $serverGroupInviteCode", Color(0xFFFFD989), 11)
+                        SmallAction("Copy group invitation") {
+                            clipboard.setPrimaryClip(ClipData.newPlainText("GlassChat group invitation", serverGroupInviteCode))
+                            notice = "Copied group invitation. Anyone holding it can join once before expiry."
+                        }
+                    }
+                    if (serverManaged) {
+                        Spacer(Modifier.height(5.dp))
+                        SmallAction("Refresh server roster") {
+                            executor.execute {
+                                try {
+                                    val rows = secureRuntime.listServerGroupMembers(groupId)
+                                    main.post { serverGroupRoster.clear(); serverGroupRoster.addAll(rows); serverGroupRosterId = groupId; notice = "Server roster refreshed. Verify every active device for every member before sending." }
+                                } catch (e: Exception) { main.post { notice = "Could not refresh server roster: ${e.message ?: "confirm membership and migration 0008"}" } }
+                            }
+                        }
+                        if (serverGroupRosterId == groupId) serverGroupRoster.forEach { member ->
+                            Spacer(Modifier.height(4.dp))
+                            ChatText("${member.optString("display_name", member.optString("username"))} · ${member.optString("role")}", Color(0xFFBFC4D0), 11)
+                        }
+                        ChatText("Relay checks that both sender and recipient belong to this group. Sending is blocked until every current member device is mutually approved and its Signal fingerprint is verified. Each message still uses separate pairwise Signal encryption, not Sender-Key.", Color(0xFFBFC4D0), 11)
+                    } else {
+                        ChatText("This local group has no server roster. Each message is encrypted separately to the devices you have verified for this ID.", Color(0xFFBFC4D0), 11)
+                    }
                 }
                 Spacer(Modifier.height(5.dp)); ChatText(
                     if (activeSecureSend != null) "Encrypted messaging · delivery state shown per message" else "Stored locally · not sent",

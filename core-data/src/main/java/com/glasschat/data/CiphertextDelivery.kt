@@ -6,5 +6,7 @@ data class CiphertextDelivery(
     val senderDeviceId: String,
     val recipientDeviceId: String,
     val ciphertext: ByteArray,
-    val expiresAt: Long
+    val expiresAt: Long,
+    /** Optional server-managed group ID; null for direct and local-only groups. */
+    val groupId: String? = null
 )

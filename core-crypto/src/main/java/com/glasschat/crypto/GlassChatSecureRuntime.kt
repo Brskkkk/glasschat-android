@@ -72,6 +72,85 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
     }
 
     @Synchronized
+    fun createServerGroup(name: String): String {
+        val cleanName = name.trim()
+        require(cleanName.length in 1..80) { "Group name must be 1–80 characters" }
+        val own = requireAccount()
+        requireLocalDevice(own.getString("id"))
+        val id = relay().createGroup(accessToken(), cleanName)
+        check(id.matches(Regex("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"))) {
+            "Server returned an invalid group ID"
+        }
+        check(store.get("conversation", id) == null) { "This server group ID is already used by a local conversation" }
+        store.put("conversation", id, JSONObject().put("id", id).put("name", cleanName)
+            .put("createdAt", System.currentTimeMillis()).put("kind", "group").put("role", "owner").put("serverManaged", true), id)
+        return id
+    }
+
+    @Synchronized
+    fun createServerGroupInvitation(groupId: String): String {
+        val conversation = store.get("conversation", groupId) ?: error("Select a saved group first")
+        check(conversation.optBoolean("serverManaged")) { "This group has no server-managed membership" }
+        val own = requireAccount()
+        requireLocalDevice(own.getString("id"))
+        val expiry = Instant.ofEpochMilli(System.currentTimeMillis() + INVITATION_LIFETIME_MS).toString()
+        return relay().createGroupInvitation(accessToken(), groupId, expiry)
+    }
+
+    @Synchronized
+    fun redeemServerGroupInvitation(code: String): JSONObject {
+        val own = requireAccount()
+        requireLocalDevice(own.getString("id"))
+        val rows = relay().redeemGroupInvitation(accessToken(), code.trim())
+        check(rows.length() == 1) { "Server did not confirm one group invitation" }
+        val row = rows.getJSONObject(0)
+        val groupId = row.getString("group_id")
+        val groupName = row.getString("group_name")
+        val existing = store.get("conversation", groupId)
+        check(existing == null || existing.optBoolean("serverManaged")) {
+            "This group ID collides with an unrelated local conversation; server membership was accepted but its local view was not replaced"
+        }
+        store.put("conversation", groupId, JSONObject().put("id", groupId).put("name", groupName)
+            .put("kind", "group").put("role", "member").put("serverManaged", true)
+            .put("createdAt", existing?.optLong("createdAt", System.currentTimeMillis()) ?: System.currentTimeMillis()), groupId)
+        return JSONObject().put("groupId", groupId).put("groupName", groupName)
+    }
+
+    @Synchronized
+    fun listServerGroups(): List<JSONObject> {
+        requireAccount()
+        val rows = relay().listMyGroups(accessToken())
+        val serverRows = (0 until rows.length()).mapNotNull { index ->
+            rows.optJSONObject(index)?.let { JSONObject(it.toString()) }
+        }
+        // Preflight all collisions before changing local conversation records.
+        serverRows.forEach { row ->
+            val id = row.getString("group_id")
+            val existing = store.get("conversation", id)
+            check(existing == null || existing.optBoolean("serverManaged")) {
+                "A server group ID collides with an unrelated local conversation; no server groups were imported"
+            }
+        }
+        serverRows.forEach { row ->
+            val id = row.getString("group_id")
+            val existing = store.get("conversation", id)
+            store.put("conversation", id, JSONObject().put("id", id)
+                .put("name", row.getString("group_name")).put("kind", "group").put("role", row.optString("role")).put("serverManaged", true)
+                .put("createdAt", existing?.optLong("createdAt", System.currentTimeMillis()) ?: System.currentTimeMillis()), id)
+        }
+        return serverRows
+    }
+
+    @Synchronized
+    fun listServerGroupMembers(groupId: String): List<JSONObject> {
+        val conversation = store.get("conversation", groupId) ?: error("Select a saved group first")
+        check(conversation.optBoolean("serverManaged")) { "This group has no server-managed membership" }
+        requireAccount()
+        val rows = relay().listGroupMembers(accessToken(), groupId)
+        return (0 until rows.length()).mapNotNull { index -> rows.optJSONObject(index)?.let { JSONObject(it.toString()) } }
+    }
+
+    @Synchronized
     fun createInvitation(): String {
         val account = requireAccount()
         check(account.optString("role") == "owner") { "Only an authenticated Owner can create invitations" }
@@ -307,6 +386,12 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
             ?: error("Create or select a saved local conversation before verifying a peer")
         val candidate = store.get("device", candidateRecordId(peerTransportDeviceId))
             ?: error("Fetch the mutually approved contact device list first")
+        if (localConversation.optBoolean("serverManaged")) {
+            val members = relay().listGroupMembers(accessToken(), conversationId)
+            check((0 until members.length()).any {
+                members.optJSONObject(it)?.optString("account_id") == candidate.optString("accountId")
+            }) { "Only a current server-group member can be verified in this conversation" }
+        }
         val existingAccounts = verifiedPeers().values
             .filter { it.conversationId == conversationId }
             .map { it.accountId }
@@ -368,8 +453,12 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
         check(conversation.optString("kind") == "group" || peers.values.map { it.accountId }.distinct().size == 1) {
             "A one-to-one conversation may only target one verified peer account."
         }
+        val serverGroupId = if (conversation.optBoolean("serverManaged")) {
+            validateServerGroupRecipientCoverage(conversationId, own.getString("id"), peers)
+            conversationId
+        } else null
         val targets = peers.map { (transportId, peer) -> VerifiedPeerTransportDeviceWithTransport(transportId, peer) }
-        val results = messaging(own.getString("id"), local).sendTextToDevices(targets, conversationId, text)
+        val results = messaging(own.getString("id"), local).sendTextToDevices(targets, conversationId, text, serverGroupId)
         val accepted = results.count { it.state == SendState.RELAY_ACCEPTED_RECIPIENT_NOT_CONFIRMED }
         val queued = results.count { it.state == SendState.ENCRYPTED_QUEUED_NOT_DELIVERED }
         val cleanupPending = results.count { it.state == SendState.RELAY_ACCEPTED_LOCAL_STATE_PENDING }
@@ -380,6 +469,48 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
             queued == results.size -> "Encrypted copies for all ${results.size} verified devices are queued locally; relay acceptance is not confirmed."
             cleanupPending > 0 -> "Relay accepted $cleanupPending device copies, but local cleanup is pending; $queued others remain queued. Recipient receipts are unconfirmed."
             else -> "Encrypted message fan-out is incomplete; check each device's local delivery state."
+        }
+    }
+
+    private fun validateServerGroupRecipientCoverage(
+        groupId: String,
+        ownAccountId: String,
+        linkedPeers: Map<String, VerifiedPeerTransportDevice>
+    ) {
+        val token = accessToken()
+        val members = relay().listGroupMembers(token, groupId)
+        val memberAccounts = (0 until members.length()).mapNotNull { members.optJSONObject(it)?.optString("account_id") }
+            .filter { it.isNotBlank() }.toSet()
+        check(ownAccountId in memberAccounts) { "Your account is no longer a member of this server group" }
+        val expectedAccounts = memberAccounts - ownAccountId
+        val linked = linkedPeers.filterValues { it.conversationId == groupId }
+        check(linked.values.map { it.accountId }.toSet() == expectedAccounts) {
+            "Refresh the server group roster and verify every member before sending"
+        }
+        val expectedDevices = LinkedHashSet<String>()
+        expectedAccounts.forEach { accountId ->
+            val directory = relay().listContactDevices(token, accountId)
+            check(directory.length() > 0) { "A server group member has no active, mutually approved devices" }
+            for (index in 0 until directory.length()) {
+                val row = directory.getJSONObject(index)
+                check(row.optString("account_id") == accountId) { "Contact directory returned a different account" }
+                val deviceId = row.getString("device_id")
+                check(expectedDevices.add(deviceId)) { "Server group directory returned a duplicate device" }
+                val verified = linked[deviceId]
+                    ?: error("Verify every active member device fingerprint before sending to this server group")
+                check(verified.accountId == accountId && verified.signalDeviceId == row.getInt("signal_device_id")) {
+                    "A verified device mapping changed; refresh and compare fingerprints again"
+                }
+                val publicKey = relay().decodePgBytea(row.getString("public_identity_key"))
+                try {
+                    check(fingerprint(publicKey) == store.get("device", verifiedRecordId(deviceId))?.optString("fingerprint")) {
+                        "A member device identity changed; verify its new fingerprint before sending"
+                    }
+                } finally { publicKey.fill(0) }
+            }
+        }
+        check(linked.keys == expectedDevices) {
+            "The verified device set no longer matches the current group roster; refresh before sending"
         }
     }
 

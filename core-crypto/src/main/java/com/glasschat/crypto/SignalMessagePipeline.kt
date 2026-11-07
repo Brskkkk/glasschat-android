@@ -186,8 +186,9 @@ class SignalMessagePipeline(
     /**
      * Encrypt one logical message independently for every verified recipient device. For a group,
      * each member device gets its own pairwise Signal session and ciphertext copy; this is not a
-     * Signal Sender-Key group protocol or a server-authoritative membership roster. Ratchet
-     * advancement, per-device ciphertext outbox rows, delivery mappings and the single visible
+     * Signal Sender-Key group protocol. Server-managed groups use a caller-validated authoritative
+     * roster and persist their group ID with each ciphertext so the relay can enforce membership.
+     * Ratchet advancement, per-device ciphertext outbox rows, delivery mappings and the single visible
      * local message commit atomically. A failure to encrypt for any device rolls the whole local
      * batch back; relay submission happens afterward and may yield partial delivery.
      */
@@ -199,6 +200,7 @@ class SignalMessagePipeline(
         recipients: List<VerifiedPeerTransportDeviceWithTransport>,
         plaintext: String,
         conversationId: String,
+        serverGroupId: String? = null,
         now: Long = System.currentTimeMillis()
     ): List<QueuedSignalDelivery> {
         require(authenticatedLocalTransportDeviceId.isNotBlank())
@@ -211,6 +213,7 @@ class SignalMessagePipeline(
                 target.peer.conversationId == conversationId
         }) { "Every recipient must be a verified device linked to this conversation" }
         require(conversationId.isNotBlank() && plaintext.isNotBlank())
+        require(serverGroupId == null || serverGroupId == conversationId) { "Server group ID must match this conversation" }
         val cleartext = plaintext.toByteArray(StandardCharsets.UTF_8)
         val messageId = java.util.UUID.randomUUID().toString()
         val expiresAt = now + MAX_RELAY_RETENTION_MS
@@ -231,7 +234,7 @@ class SignalMessagePipeline(
                     val encoded = SignalCiphertextEnvelopeCodec.encode(envelope)
                     try {
                         localStore.queueCiphertext(CiphertextDelivery(deliveryId,
-                            authenticatedLocalTransportDeviceId, target.transportDeviceId, encoded, expiresAt), now)
+                            authenticatedLocalTransportDeviceId, target.transportDeviceId, encoded, expiresAt, serverGroupId), now)
                         localStore.put("device", fanoutMappingId(deliveryId), JSONObject()
                             .put("fanoutMessageId", messageId).put("deliveryId", deliveryId)
                             .put("recipientTransportDeviceId", target.transportDeviceId), createdAt = now)

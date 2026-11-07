@@ -64,6 +64,33 @@ class SupabaseRelayClient(baseUrl: String, anonKey: String) {
         rpc(token, "gc_create_invitation", JSONObject().put("p_expires_at", expiresAtIso))
     )
 
+    fun createGroup(token: String, name: String): String {
+        require(name.trim().length in 1..80)
+        return scalarText(rpc(token, "gc_create_group", JSONObject().put("p_name", name.trim())))
+    }
+
+    fun createGroupInvitation(token: String, groupId: String, expiresAtIso: String): String {
+        requireUuid(groupId)
+        return scalarText(rpc(token, "gc_create_group_invite", JSONObject()
+            .put("p_group_id", groupId).put("p_expires_at", expiresAtIso)))
+    }
+
+    fun redeemGroupInvitation(token: String, code: String): JSONArray {
+        require(code.matches(Regex("(?i)[0-9a-f]{48}"))) { "Enter the complete one-time group invitation" }
+        return rpc(token, "gc_redeem_group_invite", JSONObject().put("p_code", code.lowercase())) as? JSONArray
+            ?: error("Group invitation returned an invalid response")
+    }
+
+    fun listMyGroups(token: String): JSONArray =
+        rpc(token, "gc_list_my_groups", JSONObject()) as? JSONArray
+            ?: error("Server group list returned an invalid response")
+
+    fun listGroupMembers(token: String, groupId: String): JSONArray {
+        requireUuid(groupId)
+        return rpc(token, "gc_list_group_members", JSONObject().put("p_group_id", groupId)) as? JSONArray
+            ?: error("Server group roster returned an invalid response")
+    }
+
     /** Server-authoritative account/device administration; RPCs enforce the active Owner role. */
     fun ownerListAccounts(token: String): JSONArray =
         rpc(token, "gc_owner_list_accounts", JSONObject()) as? JSONArray
@@ -200,9 +227,19 @@ class SupabaseRelayClient(baseUrl: String, anonKey: String) {
 
     fun fetchCiphertext(token: String, recipientDeviceId: String, limit: Int = 50): JSONArray {
         requireUuid(recipientDeviceId); require(limit in 1..100)
-        return rpc(token, "gc_fetch_ciphertext", JSONObject()
+        return rpc(token, "gc_fetch_ciphertext_v2", JSONObject()
             .put("p_recipient_device_id", recipientDeviceId).put("p_limit", limit)) as? JSONArray
             ?: error("Ciphertext fetch RPC returned an invalid response")
+    }
+
+    fun submitGroupCiphertext(token: String, deliveryId: String, groupId: String, senderDeviceId: String,
+                              recipientDeviceId: String, ciphertext: ByteArray, expiresAtIso: String): String {
+        requireUuid(deliveryId); requireUuid(groupId); requireUuid(senderDeviceId); requireUuid(recipientDeviceId)
+        require(ciphertext.isNotEmpty() && ciphertext.size <= 1_048_586)
+        return scalarText(rpc(token, "gc_submit_group_ciphertext", JSONObject()
+            .put("p_delivery_id", deliveryId).put("p_group_id", groupId)
+            .put("p_sender_device_id", senderDeviceId).put("p_recipient_device_id", recipientDeviceId)
+            .put("p_ciphertext", pgBytea(ciphertext)).put("p_expires_at", expiresAtIso)))
     }
 
     fun acknowledgeCiphertext(token: String, deliveryId: String, recipientDeviceId: String): Boolean {

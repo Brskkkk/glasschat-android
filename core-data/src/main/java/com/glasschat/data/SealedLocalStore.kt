@@ -250,7 +250,8 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
                 val same = existing.optString("senderDeviceId") == envelope.senderDeviceId &&
                     existing.optString("recipientDeviceId") == envelope.recipientDeviceId &&
                     existing.optString("ciphertext") == encoded &&
-                    existing.optLong("expiresAt") == envelope.expiresAt
+                    existing.optLong("expiresAt") == envelope.expiresAt &&
+                    existing.optString("groupId").takeIf { it.isNotBlank() && it != "null" } == envelope.groupId
                 check(same) { "Delivery ID already exists with different envelope data" }
                 return // Idempotent retry; preserve the original expiry and payload.
             }
@@ -260,6 +261,7 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
                 .put("recipientDeviceId", envelope.recipientDeviceId)
                 .put("ciphertext", encoded)
                 .put("expiresAt", envelope.expiresAt)
+                .put("groupId", envelope.groupId)
             put("relay_delivery", rowId, value, createdAt = now)
         }
     }
@@ -275,7 +277,8 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
                     senderDeviceId = row.getString("senderDeviceId"),
                     recipientDeviceId = row.getString("recipientDeviceId"),
                     ciphertext = Base64.getDecoder().decode(row.getString("ciphertext")),
-                    expiresAt = row.getLong("expiresAt")
+                    expiresAt = row.getLong("expiresAt"),
+                    groupId = row.optString("groupId").takeIf { it.isNotBlank() && it != "null" }
                 ) }.toList()
         }
     }
@@ -293,7 +296,8 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
                         senderDeviceId = row.getString("senderDeviceId"),
                         recipientDeviceId = row.getString("recipientDeviceId"),
                         ciphertext = Base64.getDecoder().decode(row.getString("ciphertext")),
-                        expiresAt = row.getLong("expiresAt")
+                        expiresAt = row.getLong("expiresAt"),
+                        groupId = row.optString("groupId").takeIf { it.isNotBlank() && it != "null" }
                     )
                 }.toList()
         }

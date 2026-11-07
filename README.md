@@ -14,7 +14,7 @@ This is the private source repository for the requested GlassChat Owner and Clie
 
 ## Still required by the supplied specification
 
-The included source has not been compiled or security-audited. Live Supabase configuration/deployment and interoperability remain unverified; Owner phone hosting/public reachability, FCM/push, attachments, full group management and many requested product features remain unfinished. A basic local group-text path now fans out pairwise Signal ciphertext to the verified devices linked to a shared UUID, but it has no authoritative roster or group Sender-Key protocol. Do not consider the application complete from source inspection alone.
+The included source has not been compiled or security-audited. Live Supabase configuration/deployment and interoperability remain unverified; Owner phone hosting/public reachability, FCM/push, attachments, full group management and many requested product features remain unfinished. Local groups still use a shared UUID, while an additional server-managed text-group path now has authoritative membership and one-time invites; it blocks sends unless every current member device is individually verified and fans out pairwise Signal ciphertext. It is not Sender-Key, lacks member removal/invite revocation and roster-version snapshots, and can have partial fan-out if membership changes during a send. Do not consider the application complete from source inspection alone.
 
 The complete feature checklist and deployment limitations are in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
 
