@@ -1,6 +1,8 @@
 package com.glasschat.ui
 
 import android.content.Context
+import android.content.ClipData
+import android.content.ClipboardManager
 import com.glasschat.data.SealedLocalStore
 import android.os.Handler
 import android.os.Looper
@@ -41,11 +43,13 @@ fun LocalMessengerScreen(
     onStopServer: () -> Unit = {}
 ) {
     val appContext = context.applicationContext
+    val clipboard = remember(appContext) { appContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager }
     val store = remember { SealedLocalStore(appContext) }
     val executor = remember { Executors.newSingleThreadExecutor() }
     val main = remember { Handler(Looper.getMainLooper()) }
     val conversations = remember { mutableStateListOf<JSONObject>() }
     val contacts = remember { mutableStateListOf<JSONObject>() }
+    val ownerAccounts = remember { mutableStateListOf<JSONObject>() }
     val nicknameInputs = remember { mutableStateMapOf<String, String>() }
     val messages = remember { mutableStateListOf<JSONObject>() }
     var selectedId by remember { mutableStateOf<String?>(null) }
@@ -58,6 +62,8 @@ fun LocalMessengerScreen(
     val searchHits = remember { mutableStateListOf<JSONObject>() }
     var notice by remember { mutableStateOf("") }
     var themeId by remember { mutableStateOf("liquid") }
+    var newInviteCode by remember { mutableStateOf("") }
+    var revokeInviteInput by remember { mutableStateOf("") }
     val theme = glassTheme(themeId)
 
     fun refreshContacts() {
@@ -74,6 +80,18 @@ fun LocalMessengerScreen(
                 }
             } catch (e: Exception) {
                 main.post { notice = "Could not open local contacts: ${e.message ?: "storage error"}" }
+            }
+        }
+    }
+
+    fun refreshOwnerAccounts() {
+        if (!owner) return
+        executor.execute {
+            try {
+                val rows = store.localAccounts()
+                main.post { ownerAccounts.clear(); ownerAccounts.addAll(rows) }
+            } catch (e: Exception) {
+                main.post { notice = "Could not open the local account registry: ${e.message ?: "storage error"}" }
             }
         }
     }
@@ -104,6 +122,7 @@ fun LocalMessengerScreen(
     LaunchedEffect(Unit) {
         refreshChats(null)
         refreshContacts()
+        refreshOwnerAccounts()
         executor.execute {
             val savedTheme = try { store.get("setting", "theme")?.optString("id") } catch (_: Exception) { null }
             if (!savedTheme.isNullOrBlank()) main.post { themeId = savedTheme }
@@ -165,6 +184,74 @@ fun LocalMessengerScreen(
                     SmallAction("Pause", onPauseServer, true)
                     SmallAction("Resume", onResumeServer, true)
                     SmallAction("Stop", onStopServer, true)
+                }
+            }
+            if (owner) Panel {
+                ChatText("LOCAL REGISTRY · OWNER DEVICE ONLY", Color.White, 16, FontWeight.SemiBold)
+                Spacer(Modifier.height(5.dp))
+                ChatText("These invitation and account controls affect only this phone. They do not register people over the network or authorize remote accounts.", Color(0xFFBFC4D0), 12)
+                Spacer(Modifier.height(9.dp))
+                SmallAction("Create 7-day local invitation") {
+                    executor.execute {
+                        try {
+                            val code = store.createLocalInvitation(System.currentTimeMillis() + 7L * 24 * 60 * 60 * 1000)
+                            main.post { newInviteCode = code; notice = "Invitation created. Only its digest is stored, so save the code now." }
+                        } catch (e: Exception) { main.post { notice = "Could not create local invitation: ${e.message ?: "storage error"}" } }
+                    }
+                }
+                if (newInviteCode.isNotBlank()) {
+                    Spacer(Modifier.height(7.dp))
+                    ChatText("One-time local code: $newInviteCode", Color(0xFFFFD989), 12, FontWeight.Medium)
+                    Spacer(Modifier.height(5.dp))
+                    SmallAction("Copy invitation code") {
+                        clipboard.setPrimaryClip(ClipData.newPlainText("GlassChat local invitation", newInviteCode))
+                        notice = "Copied. Treat the clipboard as sensitive until cleared."
+                    }
+                }
+                Spacer(Modifier.height(9.dp))
+                Entry(revokeInviteInput, { revokeInviteInput = it }, "Paste local invitation code to revoke")
+                Spacer(Modifier.height(7.dp))
+                SmallAction("Revoke local invitation", secondary = true) {
+                    val code = revokeInviteInput.trim()
+                    if (code.isBlank()) {
+                        notice = "Paste a local invitation code first."
+                    } else {
+                        executor.execute {
+                            try {
+                                val revoked = store.revokeLocalInvitation(code)
+                                main.post {
+                                    revokeInviteInput = ""
+                                    if (revoked && newInviteCode == code) newInviteCode = ""
+                                    notice = if (revoked) "Local invitation revoked." else "Invitation was not found, was already used, or was already revoked."
+                                }
+                            } catch (e: Exception) { main.post { notice = "Could not revoke invitation: ${e.message ?: "storage error"}" } }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                ChatText("LOCAL ACCOUNTS (${ownerAccounts.size})", Color.White, 13, FontWeight.SemiBold)
+                if (ownerAccounts.isEmpty()) {
+                    Spacer(Modifier.height(4.dp)); ChatText("No local accounts registered.", Color(0xFFBFC4D0), 12)
+                }
+                ownerAccounts.forEach { account ->
+                    val accountId = account.optString("id")
+                    val status = account.optString("status", "unknown")
+                    Spacer(Modifier.height(7.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            ChatText(account.optString("displayName", account.optString("username")), Color.White, 13, FontWeight.Medium)
+                            ChatText("@${account.optString("username")} · $status", Color(0xFFBFC4D0), 11)
+                        }
+                        if (status == "active" || status == "suspended") SmallAction(if (status == "active") "Suspend" else "Restore", {
+                            val next = if (status == "active") "suspended" else "active"
+                            executor.execute {
+                                try {
+                                    val changed = store.setLocalAccountStatus(accountId, next)
+                                    main.post { notice = if (changed) "Local account marked $next." else "Local account was not found."; refreshOwnerAccounts() }
+                                } catch (e: Exception) { main.post { notice = "Could not update local account: ${e.message ?: "storage error"}" } }
+                            }
+                        }, true)
+                    }
                 }
             }
             Panel {
