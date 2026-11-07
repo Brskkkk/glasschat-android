@@ -2,6 +2,7 @@ package com.glasschat.crypto
 
 import com.glasschat.data.CiphertextDelivery
 import com.glasschat.data.SealedLocalStore
+import com.glasschat.network.GroupCiphertextCopy
 import com.glasschat.network.SupabaseRelayClient
 import org.json.JSONObject
 import java.time.Instant
@@ -127,17 +128,24 @@ class SignalSupabaseMessaging(
             serverGroupMembershipVersion = serverGroupMembershipVersion,
             now = now
         )
+        if (serverGroupId != null) {
+            check(serverGroupMembershipVersion != null)
+            val expiry = queued.first().expiresAt
+            check(queued.all { it.expiresAt == expiry }) { "Group fan-out has inconsistent expiry times" }
+            return submitGroupBatch(serverGroupId, serverGroupMembershipVersion, expiry,
+                queued.map { GroupCiphertextCopy(it.deliveryId, it.recipientDeviceId, it.ciphertext) })
+        }
         return queued.map { delivery ->
-            var confirmed = false
+            var relayConfirmed = false
             try {
-                submit(delivery.deliveryId, delivery.recipientDeviceId, delivery.ciphertext, delivery.expiresAt, serverGroupId, serverGroupMembershipVersion)
-                confirmed = true
+                submit(delivery.deliveryId, delivery.recipientDeviceId, delivery.ciphertext, delivery.expiresAt)
+                relayConfirmed = true
                 pipeline.markRelayAccepted(delivery.deliveryId, delivery.recipientDeviceId)
                 SecureSendResult(delivery.deliveryId, SendState.RELAY_ACCEPTED_RECIPIENT_NOT_CONFIRMED,
                     "Encrypted ciphertext accepted for this device; recipient receipt is unconfirmed.")
             } catch (_: Exception) {
-                if (confirmed) SecureSendResult(delivery.deliveryId, SendState.RELAY_ACCEPTED_LOCAL_STATE_PENDING,
-                    "Relay accepted this device's ciphertext; local outbox cleanup is pending.")
+                if (relayConfirmed) SecureSendResult(delivery.deliveryId, SendState.RELAY_ACCEPTED_LOCAL_STATE_PENDING,
+                    "Relay accepted this device's ciphertext; local cleanup is pending.")
                 else SecureSendResult(delivery.deliveryId, SendState.ENCRYPTED_QUEUED_NOT_DELIVERED,
                     "This device's encrypted copy remains queued locally; relay acceptance is unconfirmed.")
             } finally { delivery.ciphertext.fill(0) }
@@ -148,21 +156,67 @@ class SignalSupabaseMessaging(
     @Synchronized
     fun retryPending(now: Long = System.currentTimeMillis()): List<SecureSendResult> {
         val result = ArrayList<SecureSendResult>()
-        for (delivery in localStore.pendingCiphertext(now)) {
+        val pending = localStore.pendingCiphertext(now)
+        pending.filter { it.groupId == null }.forEach { delivery ->
             var relayConfirmed = false
             try {
-                submit(delivery.deliveryId, delivery.recipientDeviceId, delivery.ciphertext, delivery.expiresAt, delivery.groupId, delivery.groupMembershipVersion)
+                submit(delivery.deliveryId, delivery.recipientDeviceId, delivery.ciphertext, delivery.expiresAt)
                 relayConfirmed = true
                 pipeline.markRelayAccepted(delivery.deliveryId, delivery.recipientDeviceId)
                 result += SecureSendResult(delivery.deliveryId, SendState.RELAY_ACCEPTED_RECIPIENT_NOT_CONFIRMED,
                     "Encrypted ciphertext accepted by relay; recipient has not confirmed receipt.")
             } catch (_: Exception) {
                 if (relayConfirmed) result += SecureSendResult(delivery.deliveryId, SendState.RELAY_ACCEPTED_LOCAL_STATE_PENDING,
-                    "Relay accepted the encrypted message; recipient receipt is unconfirmed, and local outbox cleanup is pending.")
+                    "Relay accepted this ciphertext; local cleanup is pending.")
                 else result += SecureSendResult(delivery.deliveryId, SendState.ENCRYPTED_QUEUED_NOT_DELIVERED,
                     "Still queued locally; relay acceptance is unconfirmed.")
-            } finally {
-                delivery.ciphertext.fill(0)
+            } finally { delivery.ciphertext.fill(0) }
+        }
+
+        // Keep each server-managed logical message together on retry. The atomic RPC is
+        // idempotent after a lost response, so retries cannot create a second partial fan-out.
+        val grouped = pending.filter { it.groupId != null }.groupBy { delivery ->
+            localStore.get("device", "fanout_delivery:${delivery.deliveryId}")
+                ?.optString("fanoutMessageId")?.takeIf { it.isNotBlank() }
+                ?: "missing:${delivery.deliveryId}"
+        }
+        grouped.forEach { (fanoutKey, copies) ->
+            val groupId = copies.first().groupId
+            val membershipVersion = copies.first().groupMembershipVersion
+            val expiry = copies.first().expiresAt
+            if (copies.any { it.groupId != groupId || it.groupMembershipVersion != membershipVersion || it.expiresAt != expiry }) {
+                copies.forEach { delivery ->
+                    result += SecureSendResult(delivery.deliveryId, SendState.ENCRYPTED_QUEUED_NOT_DELIVERED,
+                        "Group ciphertext remains queued locally because its saved fan-out is inconsistent.")
+                    delivery.ciphertext.fill(0)
+                }
+            } else if (groupId == null || membershipVersion == null || fanoutKey.startsWith("missing:")) {
+                copies.forEach { delivery ->
+                    result += SecureSendResult(delivery.deliveryId, SendState.ENCRYPTED_QUEUED_NOT_DELIVERED,
+                        "Group ciphertext remains queued locally; refresh the group fan-out before retrying.")
+                    delivery.ciphertext.fill(0)
+                }
+            } else {
+                val messageId = fanoutKey
+                val message = localStore.get("message", messageId)
+                val deviceStates = message?.optJSONArray("deviceDeliveries")
+                val pendingIds = copies.map { it.deliveryId }.toSet()
+                val complete = deviceStates != null && (0 until deviceStates.length()).all { index ->
+                    val state = deviceStates.optJSONObject(index) ?: return@all false
+                    state.optString("state") in setOf(
+                        SignalMessagePipeline.RELAY_ACCEPTED_DELIVERY, "recipient_stored"
+                    ) || state.optString("deliveryId") in pendingIds
+                }
+                if (!complete) {
+                    copies.forEach { delivery ->
+                        result += SecureSendResult(delivery.deliveryId, SendState.ENCRYPTED_QUEUED_NOT_DELIVERED,
+                            "Group ciphertext remains queued; refresh and prepare a complete fan-out before retrying.")
+                        delivery.ciphertext.fill(0)
+                    }
+                } else {
+                    result += submitGroupBatch(groupId, membershipVersion, expiry,
+                        copies.map { GroupCiphertextCopy(it.deliveryId, it.recipientDeviceId, it.ciphertext) })
+                }
             }
         }
         return result
@@ -267,6 +321,35 @@ class SignalSupabaseMessaging(
             }
         }
         return SecureReceiveResult(stored, newlyStored, acknowledged, skipped, failures)
+    }
+
+    private fun submitGroupBatch(
+        groupId: String,
+        membershipVersion: Long,
+        expiresAt: Long,
+        copies: List<GroupCiphertextCopy>
+    ): List<SecureSendResult> {
+        return try {
+            val accepted = relay.submitGroupCiphertextBatch(
+                token = accessToken(), groupId = groupId, membershipVersion = membershipVersion,
+                senderDeviceId = localTransportDeviceId, expiresAtIso = Instant.ofEpochMilli(expiresAt).toString(),
+                copies = copies
+            )
+            check(accepted == copies.map { it.deliveryId }.toSet())
+            copies.map { copy ->
+                try {
+                    pipeline.markRelayAccepted(copy.deliveryId, copy.recipientDeviceId)
+                    SecureSendResult(copy.deliveryId, SendState.RELAY_ACCEPTED_RECIPIENT_NOT_CONFIRMED,
+                        "Encrypted ciphertext accepted atomically for this group fan-out; recipient receipt is unconfirmed.")
+                } catch (_: Exception) {
+                    SecureSendResult(copy.deliveryId, SendState.RELAY_ACCEPTED_LOCAL_STATE_PENDING,
+                        "The relay accepted this group fan-out; local cleanup for this device remains pending.")
+                }
+            }
+        } catch (_: Exception) {
+            copies.map { copy -> SecureSendResult(copy.deliveryId, SendState.ENCRYPTED_QUEUED_NOT_DELIVERED,
+                "The complete encrypted group fan-out remains queued locally; relay acceptance is unconfirmed.") }
+        } finally { copies.forEach { it.ciphertext.fill(0) } }
     }
 
     private fun submit(

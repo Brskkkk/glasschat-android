@@ -9,6 +9,13 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
 
+/** One independently ratcheted Signal ciphertext copy for an atomic server-group fan-out. */
+data class GroupCiphertextCopy(
+    val deliveryId: String,
+    val recipientDeviceId: String,
+    val ciphertext: ByteArray
+)
+
 /** Authenticated, HTTPS-only adapter for the reviewed GlassChat Supabase REST/RPC contract.
  * No service-role key, password, token, message body or ciphertext is logged or persisted here.
  */
@@ -262,6 +269,49 @@ class SupabaseRelayClient(baseUrl: String, anonKey: String) {
             .put("p_membership_version", membershipVersion)
             .put("p_sender_device_id", senderDeviceId).put("p_recipient_device_id", recipientDeviceId)
             .put("p_ciphertext", pgBytea(ciphertext)).put("p_expires_at", expiresAtIso)))
+    }
+
+    /**
+     * Submit a complete server-managed group fan-out in one Postgres transaction. The RPC checks
+     * the locked roster version and exact active recipient-device set before accepting any copy.
+     */
+    fun submitGroupCiphertextBatch(
+        token: String,
+        groupId: String,
+        membershipVersion: Long,
+        senderDeviceId: String,
+        expiresAtIso: String,
+        copies: List<GroupCiphertextCopy>
+    ): Set<String> {
+        requireUuid(groupId); require(membershipVersion > 0); requireUuid(senderDeviceId)
+        require(copies.isNotEmpty() && copies.size <= 127)
+        require(copies.map { it.deliveryId }.distinct().size == copies.size)
+        require(copies.map { it.recipientDeviceId }.distinct().size == copies.size)
+        copies.forEach {
+            requireUuid(it.deliveryId); requireUuid(it.recipientDeviceId)
+            require(it.ciphertext.isNotEmpty() && it.ciphertext.size <= 1_048_586)
+        }
+        require(copies.sumOf { it.ciphertext.size.toLong() } <= 8L * 1024 * 1024) {
+            "Group ciphertext batch exceeds the 8 MiB limit"
+        }
+        val payload = JSONArray()
+        copies.forEach { copy ->
+            payload.put(JSONObject()
+                .put("delivery_id", copy.deliveryId)
+                .put("recipient_device_id", copy.recipientDeviceId)
+                .put("ciphertext_hex", copy.ciphertext.joinToString("") { byte ->
+                    "%02x".format(byte.toInt() and 0xff)
+                }))
+        }
+        val result = rpc(token, "gc_submit_group_ciphertext_batch", JSONObject()
+            .put("p_group_id", groupId).put("p_membership_version", membershipVersion)
+            .put("p_sender_device_id", senderDeviceId).put("p_expires_at", expiresAtIso)
+            .put("p_copies", payload)) as? JSONArray
+            ?: error("Group relay returned an invalid atomic-batch response")
+        val accepted = (0 until result.length()).map { result.getString(it) }.toSet()
+        val requested = copies.map { it.deliveryId }.toSet()
+        check(accepted == requested) { "Relay did not confirm every requested group delivery ID" }
+        return accepted
     }
 
     fun acknowledgeCiphertext(token: String, deliveryId: String, recipientDeviceId: String): Boolean {
