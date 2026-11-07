@@ -13,4 +13,5 @@ dependencies {
     implementation("org.signal:libsignal-android:0.106.2")
     implementation(project(":core-data"))
     implementation(project(":core-network"))
+    testImplementation("junit:junit:4.13.2")
 }
