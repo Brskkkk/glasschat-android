@@ -61,18 +61,35 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
         require(conversationId == null || conversationId.length <= 200) { "Invalid conversation id" }
         val encrypted = encrypt(kind, id, conversationId, createdAt, json.toString().toByteArray(StandardCharsets.UTF_8))
         synchronized(lock) {
-            writableDatabase.beginTransaction()
+            val db = writableDatabase
+            // Allow protocol-state/message writes to participate in a caller-owned transaction.
+            // Without this, an inner put() would commit the Signal ratchet independently from
+            // its ciphertext queue or decrypted local message.
+            val ownsTransaction = !db.inTransaction()
+            if (ownsTransaction) db.beginTransaction()
             try {
                 val values = ContentValues().apply {
                     put("kind", kind); put("id", id); put("conversation_id", conversationId)
                     put("created_at", createdAt); put("payload", encrypted)
                 }
-                check(writableDatabase.insertWithOnConflict("records", null, values, SQLiteDatabase.CONFLICT_REPLACE) != -1L) {
+                check(db.insertWithOnConflict("records", null, values, SQLiteDatabase.CONFLICT_REPLACE) != -1L) {
                     "Could not save encrypted record"
                 }
-                writableDatabase.setTransactionSuccessful()
-            } finally { writableDatabase.endTransaction() }
+                if (ownsTransaction) db.setTransactionSuccessful()
+            } finally { if (ownsTransaction) db.endTransaction() }
         }
+    }
+
+    /** Run a related set of encrypted record and protocol-state writes atomically in SQLite. */
+    fun <T> inTransaction(block: () -> T): T = synchronized(lock) {
+        val db = writableDatabase
+        check(!db.inTransaction()) { "Nested local-store transactions are not supported" }
+        db.beginTransaction()
+        try {
+            val result = block()
+            db.setTransactionSuccessful()
+            result
+        } finally { db.endTransaction() }
     }
 
     fun get(kind: String, id: String): JSONObject? {

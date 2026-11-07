@@ -10,6 +10,8 @@ import java.io.DataOutputStream
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.util.Base64
 
 /** Versioned transport representation; it contains only Signal ciphertext, never a plaintext fallback. */
 object SignalCiphertextEnvelopeCodec {
@@ -82,8 +84,9 @@ data class QueuedSignalDelivery(
  * Inbound processing checks authenticated transport-device mappings supplied by the caller, decrypts
  * only through the pinned Signal session, persists plaintext inside SealedLocalStore's encrypted
  * message record, and returns only after that write succeeds. A caller may acknowledge a relay copy
- * only after this method returns. Session advancement plus message persistence is not transactional;
- * callers must retain the ciphertext and handle retry/replay safely. No network transport is implemented.
+ * only after this method returns. Outbound ratchet advancement and ciphertext queue insertion, and
+ * inbound ratchet advancement and encrypted message persistence, share one local SQLite transaction.
+ * The caller must retain ciphertext until transport acknowledgment. No network transport is implemented.
  */
 class SignalMessagePipeline(
     private val localStore: SealedLocalStore,
@@ -124,24 +127,32 @@ class SignalMessagePipeline(
             }
             // encrypt() fails closed unless the local identity is provisioned and the peer identity
             // and session were established through the verified-bundle path.
-            val envelope = crypto.encrypt(
-                localAccountId,
-                localSignalDeviceId,
-                recipientAccountId,
-                recipientSignalDeviceId,
-                cleartext
-            )
-            wire = SignalCiphertextEnvelopeCodec.encode(envelope)
-            localStore.queueCiphertext(
-                CiphertextDelivery(
-                    deliveryId = deliveryId,
-                    senderDeviceId = senderTransportDeviceId,
-                    recipientDeviceId = recipientTransportDeviceId,
-                    ciphertext = wire,
-                    expiresAt = expiresAt
-                ),
-                now
-            )
+            // Signal's ratchet advancement and the durable ciphertext outbox row must commit or
+            // roll back together. Otherwise a crash between them could consume a ratchet message
+            // without retaining the bytes needed to deliver it safely.
+            wire = localStore.inTransaction {
+                val envelope = crypto.encrypt(
+                    localAccountId,
+                    localSignalDeviceId,
+                    recipientAccountId,
+                    recipientSignalDeviceId,
+                    cleartext
+                )
+                val encoded = SignalCiphertextEnvelopeCodec.encode(envelope)
+                try {
+                    localStore.queueCiphertext(
+                        CiphertextDelivery(
+                            deliveryId = deliveryId,
+                            senderDeviceId = senderTransportDeviceId,
+                            recipientDeviceId = recipientTransportDeviceId,
+                            ciphertext = encoded,
+                            expiresAt = expiresAt
+                        ),
+                        now
+                    )
+                    encoded.copyOf()
+                } finally { encoded.fill(0) }
+            }
             return QueuedSignalDelivery(
                 deliveryId = deliveryId,
                 recipientDeviceId = recipientTransportDeviceId,
@@ -184,41 +195,52 @@ class SignalMessagePipeline(
         require(delivery.expiresAt > receivedAt) { "Ciphertext delivery has expired" }
         require(conversationId.isNotBlank() && conversationId.length <= 200)
         require(senderAccountId.isNotBlank() && senderAccountId.length <= 128)
-        val existing = localStore.get("message", delivery.deliveryId)
-        if (existing != null) {
-            check(existing.optString("delivery") == RECEIVED_DELIVERY &&
-                existing.optString("conversationId") == conversationId) {
-                "Delivery ID already belongs to a different local message"
+        return localStore.inTransaction {
+            val ciphertextDigest = MessageDigest.getInstance("SHA-256").digest(delivery.ciphertext)
+            val ciphertextDigestBase64 = try {
+                Base64.getEncoder().encodeToString(ciphertextDigest)
+            } finally { ciphertextDigest.fill(0) }
+            val existing = localStore.get("message", delivery.deliveryId)
+            if (existing != null) {
+                check(existing.optString("delivery") == RECEIVED_DELIVERY &&
+                    existing.optString("conversationId") == conversationId &&
+                    existing.optString("sender") == senderAccountId &&
+                    existing.optString("ciphertextSha256") == ciphertextDigestBase64) {
+                    "Delivery ID already belongs to different encrypted content"
+                }
+                return@inTransaction delivery.deliveryId
             }
-            return delivery.deliveryId
-        }
 
-        val envelope = SignalCiphertextEnvelopeCodec.decode(delivery.ciphertext)
-        val plaintext = crypto.decrypt(
-            localAccountId,
-            localSignalDeviceId,
-            senderAccountId,
-            senderSignalDeviceId,
-            envelope
-        )
-        try {
-            val text = StandardCharsets.UTF_8.newDecoder()
-                .onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT)
-                .decode(ByteBuffer.wrap(plaintext))
-                .toString()
-            require(text.isNotBlank()) { "Empty messages are not supported" }
-            val message = JSONObject()
-                .put("id", delivery.deliveryId)
-                .put("conversationId", conversationId)
-                .put("sender", senderAccountId)
-                .put("text", text)
-                .put("createdAt", receivedAt)
-                .put("delivery", RECEIVED_DELIVERY)
-            localStore.put("message", delivery.deliveryId, message, conversationId, receivedAt)
-            return delivery.deliveryId
-        } finally {
-            plaintext.fill(0)
+            val envelope = SignalCiphertextEnvelopeCodec.decode(delivery.ciphertext)
+            // SessionCipher may advance session/pre-key state. Persist that change and the
+            // encrypted local message atomically, so a retry after a crash is idempotent.
+            val plaintext = crypto.decrypt(
+                localAccountId,
+                localSignalDeviceId,
+                senderAccountId,
+                senderSignalDeviceId,
+                envelope
+            )
+            try {
+                val text = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(plaintext))
+                    .toString()
+                require(text.isNotBlank()) { "Empty messages are not supported" }
+                val message = JSONObject()
+                    .put("id", delivery.deliveryId)
+                    .put("conversationId", conversationId)
+                    .put("sender", senderAccountId)
+                    .put("text", text)
+                    .put("createdAt", receivedAt)
+                    .put("delivery", RECEIVED_DELIVERY)
+                    .put("ciphertextSha256", ciphertextDigestBase64)
+                localStore.put("message", delivery.deliveryId, message, conversationId, receivedAt)
+                delivery.deliveryId
+            } finally {
+                plaintext.fill(0)
+            }
         }
     }
 
