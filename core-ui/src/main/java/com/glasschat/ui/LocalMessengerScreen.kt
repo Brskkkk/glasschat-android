@@ -26,6 +26,7 @@ import androidx.compose.foundation.text.BasicText
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.*
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -62,6 +63,8 @@ fun LocalMessengerScreen(
     val serverAccounts = remember { mutableStateListOf<JSONObject>() }
     val serverAudit = remember { mutableStateListOf<JSONObject>() }
     val ownerAudit = remember { mutableStateListOf<JSONObject>() }
+    val ownerNicknameEvents = remember { mutableStateListOf<JSONObject>() }
+    var ownerNicknamePrompt by remember { mutableStateOf<Triple<String, String, String>?>(null) }
     val nicknameInputs = remember { mutableStateMapOf<String, String>() }
     val messages = remember { mutableStateListOf<JSONObject>() }
     var selectedId by remember { mutableStateOf<String?>(null) }
@@ -201,13 +204,15 @@ fun LocalMessengerScreen(
             try {
                 val rows = secureRuntime.ownerListAccounts()
                 val auditRows = secureRuntime.ownerListAdminAudit(100)
+                val nicknameRows = secureRuntime.ownerListNicknameEvents(100)
                 main.post {
                     serverAccounts.clear(); serverAccounts.addAll(rows)
                     serverAudit.clear(); serverAudit.addAll(auditRows)
-                    notice = "Server accounts, device states, and admin audit refreshed."
+                    ownerNicknameEvents.clear(); ownerNicknameEvents.addAll(nicknameRows)
+                    notice = "Server accounts, devices, audit, and Owner nickname activity refreshed."
                 }
             } catch (e: Exception) {
-                main.post { notice = "Could not refresh server accounts; confirm this is an authenticated Owner and migration 0007 is deployed. ${e.message ?: "request failed"}" }
+                main.post { notice = "Could not refresh server data; confirm this is an authenticated Owner and migrations 0007 and 0011 are deployed. ${e.message ?: "request failed"}" }
             }
         }
     }
@@ -555,6 +560,19 @@ fun LocalMessengerScreen(
                     if (accountId.isNotBlank() && accountId != "null") ChatText("Account: $accountId", Color(0xFFBFC4D0), 10)
                     if (deviceId.isNotBlank() && deviceId != "null") ChatText("Device: $deviceId", Color(0xFFBFC4D0), 10)
                 }
+                Spacer(Modifier.height(10.dp))
+                ChatText("SHARED NICKNAME ACTIVITY", Color.White, 13, FontWeight.SemiBold)
+                ChatText("Only nicknames Clients explicitly shared with this official Owner appear here.", Color(0xFFBFC4D0), 11)
+                if (ownerNicknameEvents.isEmpty()) {
+                    Spacer(Modifier.height(5.dp)); ChatText("No shared nickname events returned.", Color(0xFFBFC4D0), 11)
+                }
+                ownerNicknameEvents.take(20).forEach { event ->
+                    val eventName = event.optString("event_type").replace('_', ' ')
+                    val client = event.optString("assigning_display_name").ifBlank { event.optString("assigning_username", "Client") }
+                    Spacer(Modifier.height(6.dp))
+                    ChatText("$eventName · ${event.optString("created_at")}", Color.White, 11, FontWeight.Medium)
+                    ChatText("$client · ${event.optString("nickname")}", Color(0xFFBFC4D0), 11)
+                }
             }
             Panel {
                 ChatText("THEME STUDIO", Color.White, 16, FontWeight.SemiBold)
@@ -824,6 +842,14 @@ fun LocalMessengerScreen(
                                         check(store.setLocalContactNickname(contactId, value)) { "Contact no longer exists" }
                                         main.post { notice = if (value.isBlank()) "Private nickname removed." else "Private nickname saved on this device."; refreshContacts() }
                                     } catch (e: Exception) { main.post { notice = "Could not save nickname: ${e.message ?: "storage error"}" } }
+                                }
+                            }, true)
+                            SmallAction("Share with Owner…", {
+                                val target = contact.optString("glasschatId").trim()
+                                if (!target.matches(Regex("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"))) {
+                                    notice = "To share with the Owner, this contact needs the Owner’s GlassChat account UUID."
+                                } else {
+                                    ownerNicknamePrompt = Triple(contactId, target, contact.optString("label", "this contact"))
                                 }
                             }, true)
                             SmallAction("Remove contact", {
@@ -1153,6 +1179,46 @@ fun LocalMessengerScreen(
                 else "No remote account or service is configured.",
                 Color(0xFF9FA6B5), 12
             )
+        }
+    }
+    ownerNicknamePrompt?.let { prompt ->
+        val contactId = prompt.first
+        val ownerAccountId = prompt.second
+        val contactLabel = prompt.third
+        val nickname = nicknameInputs[contactId].orEmpty().trim()
+        Dialog(onDismissRequest = { ownerNicknamePrompt = null }) {
+            Panel {
+                ChatText("SHARE THIS NICKNAME WITH THE OWNER?", Color.White, 16, FontWeight.SemiBold)
+                Spacer(Modifier.height(8.dp))
+                ChatText(
+                    "This sends the nickname for $contactLabel to the single active official Owner account and records your account name, the nickname, whether it was assigned, changed, or removed, and when. Your other contact nicknames stay private.",
+                    Color(0xFFE8E9F0), 13
+                )
+                Spacer(Modifier.height(6.dp))
+                ChatText(if (nickname.isBlank()) "You’re sharing a removal of the previously shared nickname." else "Nickname to share: $nickname", Color(0xFFFFD989), 12, FontWeight.Medium)
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SmallAction("Keep it private", { ownerNicknamePrompt = null }, true)
+                    SmallAction("Share nickname", {
+                        ownerNicknamePrompt = null
+                        executor.execute {
+                            try {
+                                check(store.setLocalContactNickname(contactId, nickname)) { "Contact no longer exists" }
+                                val changed = secureRuntime.setOwnerNickname(ownerAccountId, nickname)
+                                main.post {
+                                    notice = if (changed) "Nickname saved here and shared with the official Owner." else "Nickname saved here; no new Owner activity was needed."
+                                    refreshContacts()
+                                }
+                            } catch (e: Exception) {
+                                main.post {
+                                    notice = "Nickname saved privately here, but Owner sharing failed: ${e.message ?: "check sign-in, UUID, and migration 0011"}"
+                                    refreshContacts()
+                                }
+                            }
+                        }
+                    })
+                }
+            }
         }
     }
 }

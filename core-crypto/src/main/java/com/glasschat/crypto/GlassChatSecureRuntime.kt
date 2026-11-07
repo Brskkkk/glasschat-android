@@ -206,6 +206,21 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
         return (0 until rows.length()).mapNotNull { rows.optJSONObject(it)?.let { row -> JSONObject(row.toString()) } }
     }
 
+    /** Invoked only after the user explicitly confirms sharing this nickname with the official Owner. */
+    @Synchronized
+    fun setOwnerNickname(ownerAccountId: String, nickname: String): Boolean {
+        val account = requireAccount()
+        check(account.optString("role") == "client") { "Only an active Client can share an Owner nickname" }
+        return relay().setOwnerNickname(accessToken(), ownerAccountId, nickname)
+    }
+
+    @Synchronized
+    fun ownerListNicknameEvents(limit: Int = 100): List<JSONObject> {
+        requireOwnerAccount()
+        val rows = relay().ownerListNicknameEvents(accessToken(), limit)
+        return (0 until rows.length()).mapNotNull { rows.optJSONObject(it)?.let { row -> JSONObject(row.toString()) } }
+    }
+
     @Synchronized
     fun ownerSetClientStatus(accountId: String, status: String): Boolean {
         requireOwnerAccount()

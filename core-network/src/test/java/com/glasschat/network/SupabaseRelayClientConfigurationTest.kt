@@ -55,4 +55,28 @@ class SupabaseRelayClientConfigurationTest {
             SupabaseRelayClient("https://project.example", "  ")
         }
     }
+    @Test
+    fun ownerNicknameUpdateRejectsInvalidOwnerIdBeforeNetworkAccess() {
+        val client = SupabaseRelayClient("https://project.example", "public-anon-key")
+        assertThrows(IllegalArgumentException::class.java) {
+            client.setOwnerNickname("test-token", "not-a-uuid", "Owner name")
+        }
+    }
+
+    @Test
+    fun ownerNicknameUpdateRejectsOverlongNicknameBeforeNetworkAccess() {
+        val client = SupabaseRelayClient("https://project.example", "public-anon-key")
+        assertThrows(IllegalArgumentException::class.java) {
+            client.setOwnerNickname("test-token", "123e4567-e89b-12d3-a456-426614174000", "x".repeat(81))
+        }
+    }
+
+    @Test
+    fun ownerNicknameActivityRejectsOutOfRangeLimitBeforeNetworkAccess() {
+        val client = SupabaseRelayClient("https://project.example", "public-anon-key")
+        assertThrows(IllegalArgumentException::class.java) {
+            client.ownerListNicknameEvents("test-token", 201)
+        }
+    }
+
 }

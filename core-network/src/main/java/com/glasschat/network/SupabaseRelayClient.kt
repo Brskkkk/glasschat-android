@@ -137,6 +137,24 @@ class SupabaseRelayClient(baseUrl: String, anonKey: String) {
             ?: error("Owner audit listing returned an invalid response")
     }
 
+    /** Record a nickname only after the Client has explicitly confirmed sharing it with the Owner. */
+    fun setOwnerNickname(token: String, ownerAccountId: String, nickname: String): Boolean {
+        requireUuid(ownerAccountId)
+        val clean = nickname.trim()
+        require(clean.isEmpty() || clean.length <= 80) { "Nickname must be at most 80 characters" }
+        val value: Any = if (clean.isEmpty()) JSONObject.NULL else clean
+        return rpc(token, "gc_set_owner_nickname", JSONObject()
+            .put("p_owner_account_id", ownerAccountId).put("p_nickname", value)) as? Boolean
+            ?: error("Owner nickname update returned an invalid response")
+    }
+
+    /** Owner-only event history; never includes nicknames assigned to other contacts. */
+    fun ownerListNicknameEvents(token: String, limit: Int = 100): JSONArray {
+        require(limit in 1..200)
+        return rpc(token, "gc_owner_list_nickname_events", JSONObject().put("p_limit", limit)) as? JSONArray
+            ?: error("Owner nickname activity returned an invalid response")
+    }
+
     fun ownerSetClientStatus(token: String, accountId: String, status: String): Boolean {
         requireUuid(accountId); require(status in setOf("active", "suspended"))
         return rpc(token, "gc_owner_set_client_status", JSONObject()
