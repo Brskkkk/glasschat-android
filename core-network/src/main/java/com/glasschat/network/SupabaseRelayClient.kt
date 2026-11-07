@@ -29,6 +29,9 @@ class SupabaseRelayClient(baseUrl: String, anonKey: String) {
             "Supabase endpoint must be an HTTPS URL"
         }
         require(parsed.query == null && parsed.ref == null) { "Supabase endpoint must not include a query or fragment" }
+        require(parsed.path.isNullOrEmpty() || parsed.path == "/") {
+            "Supabase endpoint must be the project root URL, without a path"
+        }
         require(anonKey.isNotBlank()) { "Supabase public anon key is not configured" }
         root = parsed.toString().trimEnd('/')
         anon = anonKey.trim()

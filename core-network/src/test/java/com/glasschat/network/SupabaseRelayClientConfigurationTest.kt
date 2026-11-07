@@ -43,6 +43,13 @@ class SupabaseRelayClientConfigurationTest {
     }
 
     @Test
+    fun rejectsEndpointPath() {
+        assertThrows(IllegalArgumentException::class.java) {
+            SupabaseRelayClient("https://project.example/dashboard", "public-anon-key")
+        }
+    }
+
+    @Test
     fun rejectsBlankPublicKey() {
         assertThrows(IllegalArgumentException::class.java) {
             SupabaseRelayClient("https://project.example", "  ")
