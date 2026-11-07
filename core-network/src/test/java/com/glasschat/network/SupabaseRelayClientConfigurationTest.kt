@@ -1,0 +1,51 @@
+package com.glasschat.network
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
+import org.junit.Test
+
+class SupabaseRelayClientConfigurationTest {
+    @Test
+    fun acceptsHttpsProjectRootAndNormalizesTrailingSlash() {
+        val client = SupabaseRelayClient(" https://project.example/ ", " public-anon-key ")
+
+        // Construction is local-only; no request is made until a client operation is invoked.
+        assertEquals("https://project.example", client.javaClass.getDeclaredField("root").apply {
+            isAccessible = true
+        }.get(client))
+        assertEquals("public-anon-key", client.javaClass.getDeclaredField("anon").apply {
+            isAccessible = true
+        }.get(client))
+    }
+
+    @Test
+    fun rejectsNonHttpsEndpoint() {
+        assertThrows(IllegalArgumentException::class.java) {
+            SupabaseRelayClient("http://project.example", "public-anon-key")
+        }
+    }
+
+    @Test
+    fun rejectsEndpointCredentials() {
+        assertThrows(IllegalArgumentException::class.java) {
+            SupabaseRelayClient("https://user:password@project.example", "public-anon-key")
+        }
+    }
+
+    @Test
+    fun rejectsEndpointQueryAndFragment() {
+        assertThrows(IllegalArgumentException::class.java) {
+            SupabaseRelayClient("https://project.example?token=x", "public-anon-key")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            SupabaseRelayClient("https://project.example#fragment", "public-anon-key")
+        }
+    }
+
+    @Test
+    fun rejectsBlankPublicKey() {
+        assertThrows(IllegalArgumentException::class.java) {
+            SupabaseRelayClient("https://project.example", "  ")
+        }
+    }
+}
