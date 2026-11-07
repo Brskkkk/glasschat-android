@@ -272,6 +272,13 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
     }
 
     @Synchronized
+    fun refreshDeliveryStatuses(): String {
+        val own = requireAccount(); val local = requireLocalDevice(own.getString("id"))
+        val updated = messaging(own.getString("id"), local).refreshDeliveryStatuses()
+        return "Updated delivery receipts for $updated message(s); acknowledgments mean saved on the recipient device, not read."
+    }
+
+    @Synchronized
     fun retryQueued(): String {
         val own = requireAccount(); val local = requireLocalDevice(own.getString("id"))
         val results = messaging(own.getString("id"), local).retryPending()

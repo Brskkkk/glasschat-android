@@ -72,6 +72,9 @@ data class QueuedSignalDelivery(
     val ciphertext: ByteArray
 )
 
+/** Minimal status metadata returned by the authenticated relay; never includes message content. */
+data class RelayDeliveryReceipt(val recipientDeviceId: String, val status: String, val recordedAt: Long?)
+
 /**
  * Local E2EE message boundary shared by Owner and Client builds. Outbound text is encrypted with
  * an already-established, identity-pinned Signal session before any record is written. The local
@@ -229,6 +232,7 @@ class SignalMessagePipeline(
                         deviceStates.put(JSONObject().put("deliveryId", deliveryId)
                             .put("recipientTransportDeviceId", target.transportDeviceId)
                             .put("signalDeviceId", target.peer.signalDeviceId)
+                            .put("expiresAt", expiresAt)
                             .put("state", QUEUED_DELIVERY))
                         rows += QueuedSignalDelivery(deliveryId, target.transportDeviceId, expiresAt, encoded.copyOf())
                     } finally { encoded.fill(0) }
@@ -368,6 +372,69 @@ class SignalMessagePipeline(
                 "Relay accepted the message but its local ciphertext copy could not be cleared"
             }
             if (fanout != null) check(localStore.delete("device", fanoutId)) { "Fan-out mapping could not be cleared" }
+        }
+    }
+
+    /** Apply authenticated sender-visible relay receipts to their exact per-device outbox entries. */
+    @Synchronized
+    fun applyDeliveryReceipts(receipts: Map<String, RelayDeliveryReceipt>): Int = localStore.inTransaction {
+        var changed = 0
+        for (message in localStore.list("message")) {
+            val states = message.optJSONArray("deviceDeliveries") ?: continue
+            var messageChanged = false
+            for (index in 0 until states.length()) {
+                val state = states.optJSONObject(index) ?: continue
+                val deliveryId = state.optString("deliveryId")
+                val receipt = receipts[deliveryId] ?: continue
+                check(state.optString("recipientTransportDeviceId") == receipt.recipientDeviceId) {
+                    "Relay status recipient does not match the locally verified device mapping"
+                }
+                val previous = state.optString("state")
+                val next = when (receipt.status) {
+                    "acknowledged" -> "recipient_stored"
+                    "expired" -> "relay_expired"
+                    "pending" -> RELAY_ACCEPTED_DELIVERY
+                    else -> error("Relay returned an unsupported delivery status")
+                }
+                if (previous == next) continue
+                if (previous == "recipient_stored" || previous == "relay_expired") {
+                    // Terminal receipts cannot regress or be replaced by a contradictory result.
+                    if (next == RELAY_ACCEPTED_DELIVERY) continue
+                    error("Relay returned a conflicting status for a terminal delivery receipt")
+                }
+                check(previous == RELAY_ACCEPTED_DELIVERY) {
+                    "Relay receipt cannot advance a delivery that was not accepted"
+                }
+                state.put("state", next)
+                receipt.recordedAt?.let { state.put(if (next == "recipient_stored") "recipientStoredAt" else "relayExpiredAt", it) }
+                messageChanged = true
+            }
+            if (messageChanged) {
+                message.put("deviceDeliveries", states)
+                message.put("delivery", aggregateDeliveryState(states))
+                message.put("deliveryStatusCheckedAt", System.currentTimeMillis())
+                localStore.put("message", message.getString("id"), message,
+                    message.optString("conversationId"), message.optLong("createdAt", System.currentTimeMillis()))
+                changed++
+            }
+        }
+        changed
+    }
+
+    private fun aggregateDeliveryState(states: org.json.JSONArray): String {
+        val values = (0 until states.length()).mapNotNull { states.optJSONObject(it)?.optString("state") }
+        if (values.isEmpty()) return QUEUED_DELIVERY
+        val stored = values.count { it == "recipient_stored" }
+        val expired = values.count { it == "relay_expired" }
+        val accepted = values.count { it == RELAY_ACCEPTED_DELIVERY || it == "recipient_stored" }
+        return when {
+            stored == values.size -> "recipient_stored_all_devices"
+            stored > 0 -> "recipient_stored_some_devices"
+            expired == values.size -> "encrypted_expired"
+            expired > 0 -> "encrypted_partial_expiry"
+            accepted == values.size -> RELAY_ACCEPTED_DELIVERY
+            accepted > 0 -> PARTIAL_DELIVERY
+            else -> QUEUED_DELIVERY
         }
     }
 

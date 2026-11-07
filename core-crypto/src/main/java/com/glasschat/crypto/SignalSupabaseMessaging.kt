@@ -156,6 +156,42 @@ class SignalSupabaseMessaging(
         return result
     }
 
+    /** Refresh sender-owned, per-device durable-storage receipts without exposing relay ciphertext. */
+    @Synchronized
+    fun refreshDeliveryStatuses(): Int {
+        val expected = LinkedHashMap<String, String>()
+        for (message in localStore.list("message")) {
+            val states = message.optJSONArray("deviceDeliveries") ?: continue
+            for (index in 0 until states.length()) {
+                val state = states.optJSONObject(index) ?: continue
+                if (state.optString("state") == "relay_accepted_recipient_not_confirmed") {
+                    val id = state.optString("deliveryId")
+                    val recipient = state.optString("recipientTransportDeviceId")
+                    if (id.isNotBlank() && recipient.isNotBlank()) expected[id] = recipient
+                }
+            }
+        }
+        if (expected.isEmpty()) return 0
+        val receipts = LinkedHashMap<String, RelayDeliveryReceipt>()
+        val ids = expected.keys.toList()
+        for (batch in ids.chunked(100)) {
+            val rows = relay.fetchDeliveryStatuses(accessToken(), localTransportDeviceId, batch)
+            for (index in 0 until rows.length()) {
+                val row = rows.optJSONObject(index) ?: continue
+                val id = row.optString("delivery_id")
+                val recipient = row.optString("recipient_device_id")
+                val status = row.optString("status")
+                if (id !in batch || expected[id] != recipient) continue
+                val recordedAt = row.optString("recorded_at").takeIf { it.isNotBlank() }
+                    ?.let { try { Instant.parse(it).toEpochMilli() } catch (_: Exception) { null } }
+                receipts[id] = RelayDeliveryReceipt(recipient, status, recordedAt)
+            }
+        }
+        // A missing response is not proof of delivery. Leave it unchanged; only the authenticated
+        // status RPC may advance the visible state.
+        return pipeline.applyDeliveryReceipts(receipts)
+    }
+
     /**
      * Poll encrypted deliveries. `peerDevices` must come from authenticated contact-device lookup
      * and must already bind each transport UUID to the expected Signal account/device/conversation.

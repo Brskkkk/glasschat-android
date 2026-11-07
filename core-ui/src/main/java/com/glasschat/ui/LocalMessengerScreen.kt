@@ -799,6 +799,12 @@ private fun deliveryLabel(state: String): String = when (state) {
     "encrypted_queued_not_delivered" -> "Encrypted · queued on this device · not delivered"
     "relay_accepted_recipient_not_confirmed" -> "Encrypted · relay accepted · recipient receipt unconfirmed"
     "encrypted_partially_accepted" -> "Encrypted · relay accepted on some devices; remaining copies are queued"
+    "recipient_stored_all_devices" -> "Encrypted · saved on all recipient devices"
+    "recipient_stored_some_devices" -> "Encrypted · saved on some recipient devices"
+    "encrypted_expired" -> "Encrypted · expired before recipient storage was confirmed"
+    "encrypted_partial_expiry" -> "Encrypted · some device deliveries expired"
+    "recipient_stored" -> "Encrypted · saved on this recipient device"
+    "relay_expired" -> "Encrypted · expired before storage was confirmed"
     "received_encrypted_local" -> "Received encrypted · saved on this device"
     else -> state.replace('_', ' ')
 }

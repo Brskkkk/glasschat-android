@@ -25,6 +25,7 @@ class SecureSyncWorker(context: Context, params: WorkerParameters) : Worker(cont
             val runtime = GlassChatSecureRuntime(store)
             runtime.retryQueued()
             runtime.receive()
+            runtime.refreshDeliveryStatuses()
             Result.success()
         } catch (_: Exception) {
             if (runAttemptCount >= MAX_RETRIES) Result.failure() else Result.retry()

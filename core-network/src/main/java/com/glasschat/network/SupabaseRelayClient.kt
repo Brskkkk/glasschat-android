@@ -179,6 +179,18 @@ class SupabaseRelayClient(baseUrl: String, anonKey: String) {
         return (result as? Number)?.toInt() ?: error("Ciphertext expiry RPC returned an invalid response")
     }
 
+    /** Read only sender-owned per-device delivery metadata; no ciphertext is returned. */
+    fun fetchDeliveryStatuses(token: String, senderDeviceId: String, deliveryIds: List<String>): JSONArray {
+        requireUuid(senderDeviceId)
+        require(deliveryIds.isNotEmpty() && deliveryIds.size <= 100) { "Delivery status batch must contain 1–100 IDs" }
+        require(deliveryIds.distinct().size == deliveryIds.size) { "Delivery status batch contains duplicate IDs" }
+        deliveryIds.forEach { requireUuid(it) }
+        val ids = JSONArray().apply { deliveryIds.forEach { put(it) } }
+        return rpc(token, "gc_fetch_delivery_status", JSONObject()
+            .put("p_sender_device_id", senderDeviceId).put("p_delivery_ids", ids)) as? JSONArray
+            ?: error("Delivery status lookup returned an invalid response")
+    }
+
     fun rpc(token: String, function: String, arguments: JSONObject): Any? {
         require(function.matches(Regex("gc_[a-z0-9_]{1,80}")))
         require(token.isNotBlank()) { "Authenticated Supabase session is required" }
