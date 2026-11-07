@@ -3,6 +3,7 @@ package com.glasschat.ui
 import android.content.Context
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.net.Uri
 import com.glasschat.data.SealedLocalStore
 import com.glasschat.crypto.GlassChatSecureRuntime
 import android.os.Handler
@@ -77,6 +78,10 @@ fun LocalMessengerScreen(
     val serverGroupInvites = remember { mutableStateListOf<JSONObject>() }
     var serverGroupInvitesId by remember { mutableStateOf("") }
     var messageInput by remember { mutableStateOf("") }
+    var pendingAttachment by remember { mutableStateOf<InlineEncryptedAttachment?>(null) }
+    var pendingAttachmentConversationId by remember { mutableStateOf<String?>(null) }
+    var attachmentPickerTargetConversationId by remember { mutableStateOf<String?>(null) }
+    var bytesToSave by remember { mutableStateOf<ByteArray?>(null) }
     var editingMessageId by remember { mutableStateOf<String?>(null) }
     var searchInput by remember { mutableStateOf("") }
     val searchHits = remember { mutableStateListOf<JSONObject>() }
@@ -110,6 +115,31 @@ fun LocalMessengerScreen(
     val baseTheme = glassTheme(themeId)
     val customAccent = parseThemeColor(customAccentHex)
     val theme = if (customAccent == null) baseTheme else baseTheme.copy(accent = customAccent, swatch = customAccent)
+    val attachmentPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        val targetConversationId = attachmentPickerTargetConversationId
+        attachmentPickerTargetConversationId = null
+        if (uri != null && targetConversationId != null) executor.execute {
+            try {
+                val attachment = InlineEncryptedAttachmentCodec.readFrom(appContext.contentResolver, uri)
+                main.post { pendingAttachment = attachment; pendingAttachmentConversationId = targetConversationId; messageInput = ""; notice = "${attachment.fileName} is ready to send through the verified encrypted conversation." }
+            } catch (e: Exception) {
+                main.post { notice = e.message ?: "Could not prepare that file." }
+            }
+        }
+    }
+    val attachmentSaver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri: Uri? ->
+        val bytes = bytesToSave
+        bytesToSave = null
+        if (uri != null && bytes != null) executor.execute {
+            try {
+                appContext.contentResolver.openOutputStream(uri, "wt")?.use { it.write(bytes) }
+                    ?: error("Could not open the selected save location.")
+                main.post { notice = "Attachment saved to the location you chose." }
+            } catch (e: Exception) {
+                main.post { notice = e.message ?: "Could not save the attachment." }
+            } finally { bytes.fill(0) }
+        } else bytes?.fill(0)
+    }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -980,7 +1010,22 @@ fun LocalMessengerScreen(
                     Panel {
                         ChatText(item.optString("sender", "You"), theme.accent, 11, FontWeight.SemiBold)
                         Spacer(Modifier.height(3.dp))
-                        ChatText(item.optString("text"), Color(0xFFE8E9F0), 14)
+                        val body = item.optString("text")
+                        val attachment = if (InlineEncryptedAttachmentCodec.isAttachment(body)) InlineEncryptedAttachmentCodec.describe(body) else null
+                        if (InlineEncryptedAttachmentCodec.isAttachment(body)) {
+                            if (attachment == null) ChatText("Attachment data is invalid.", Color(0xFFFFD7A8), 14)
+                            else {
+                                ChatText("File · ${attachment.fileName} · ${attachment.byteCount} bytes", Color(0xFFE8E9F0), 14)
+                                SmallAction("Save attachment") {
+                                    executor.execute {
+                                        try {
+                                            val (_, bytes) = InlineEncryptedAttachmentCodec.decode(body)
+                                            main.post { bytesToSave = bytes; attachmentSaver.launch(attachment.fileName) }
+                                        } catch (e: Exception) { main.post { notice = e.message ?: "Could not open this attachment." } }
+                                    }
+                                }
+                            }
+                        } else ChatText(body, Color(0xFFE8E9F0), 14)
                         val deliveryState = item.optString("delivery")
                         if (deliveryState.isNotBlank()) {
                             Spacer(Modifier.height(4.dp))
@@ -1035,11 +1080,27 @@ fun LocalMessengerScreen(
                 }
                 Spacer(Modifier.height(10.dp))
                 if (editingMessageId != null) ChatText("Editing this device’s copy only", Color(0xFFFFD7A8), 12)
-                Entry(messageInput, { messageInput = it }, "Write a local note/message")
+                if (pendingAttachment != null && editingMessageId == null) {
+                    ChatText("Ready: ${pendingAttachment?.fileName} · ${pendingAttachment?.byteCount} bytes", theme.accent, 12)
+                    SmallAction("Remove attachment", { pendingAttachment = null; pendingAttachmentConversationId = null }, true)
+                    if (pendingAttachmentConversationId != selectedId) ChatText("This file is reserved for the conversation where you chose it.", Color(0xFFFFD7A8), 12)
+                } else Entry(messageInput, { messageInput = it }, "Write a local note/message")
+                if (editingMessageId == null) {
+                    Spacer(Modifier.height(8.dp))
+                    SmallAction("Choose a file (max 512 KiB)") {
+                        val target = selectedId
+                        if (target == null) notice = "Choose a conversation before selecting a file."
+                        else { attachmentPickerTargetConversationId = target; attachmentPicker.launch("*/*") }
+                    }
+                }
                 Spacer(Modifier.height(8.dp))
-                SmallAction(if (editingMessageId == null && activeSecureSend != null) "Send encrypted" else if (editingMessageId == null) "Save message on this device" else "Save local edit") {
-                    val text = messageInput.trim(); val conversationId = selectedId; val editingId = editingMessageId
-                    if (text.isBlank() || conversationId == null) notice = "Write a message first."
+                SmallAction(if (pendingAttachment != null && editingMessageId == null) "Send encrypted file" else if (editingMessageId == null && activeSecureSend != null) "Send encrypted" else if (editingMessageId == null) "Save message on this device" else "Save local edit") {
+                    val attachmentToSend = pendingAttachment
+                    val text = if (attachmentToSend != null && editingMessageId == null) attachmentToSend.serialized else messageInput.trim()
+                    val conversationId = selectedId; val editingId = editingMessageId
+                    if (conversationId == null || (text.isBlank() && attachmentToSend == null)) notice = "Write a message or choose a file first."
+                    else if (attachmentToSend != null && pendingAttachmentConversationId != conversationId) notice = "This file was selected for another conversation; return to it or remove the file."
+                    else if (attachmentToSend != null && editingId == null && activeSecureSend == null) notice = "Files can only be sent after this conversation has a verified encrypted session."
                     else if (editingId != null) {
                         executor.execute {
                             try {
@@ -1051,11 +1112,13 @@ fun LocalMessengerScreen(
                         executor.execute {
                             try {
                                 val status = activeSecureSend.invoke(conversationId, text)
-                                main.post { messageInput = ""; notice = status; refreshChats(conversationId) }
+                                main.post { messageInput = ""; pendingAttachment = null; pendingAttachmentConversationId = null; notice = status; refreshChats(conversationId) }
                             } catch (_: Exception) {
                                 main.post { notice = "Encrypted send failed; the message was not sent and remains in the composer." }
                             }
                         }
+                    } else if (attachmentToSend != null) {
+                        notice = "Files can only be sent through a verified encrypted session."
                     } else {
                         val now = System.currentTimeMillis(); val id = UUID.randomUUID().toString()
                         val item = JSONObject().put("id", id).put("conversationId", conversationId).put("sender", "You").put("text", text).put("createdAt", now).put("delivery", "local_only")
