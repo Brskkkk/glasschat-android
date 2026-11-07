@@ -184,7 +184,9 @@ class SignalMessagePipeline(
     }
 
     /**
-     * Encrypt one logical message independently for every verified recipient device. Ratchet
+     * Encrypt one logical message independently for every verified recipient device. For a group,
+     * each member device gets its own pairwise Signal session and ciphertext copy; this is not a
+     * Signal Sender-Key group protocol or a server-authoritative membership roster. Ratchet
      * advancement, per-device ciphertext outbox rows, delivery mappings and the single visible
      * local message commit atomically. A failure to encrypt for any device rolls the whole local
      * batch back; relay submission happens afterward and may yield partial delivery.
@@ -204,9 +206,10 @@ class SignalMessagePipeline(
         require(recipients.map { it.transportDeviceId }.distinct().size == recipients.size) {
             "Recipient device list contains duplicates"
         }
-        require(recipients.map { it.peer.accountId }.distinct().size == 1) {
-            "A fan-out batch must target devices belonging to one verified peer account"
-        }
+        require(recipients.all { target ->
+            target.peer.accountId.isNotBlank() && target.peer.signalDeviceId in 1..127 &&
+                target.peer.conversationId == conversationId
+        }) { "Every recipient must be a verified device linked to this conversation" }
         require(conversationId.isNotBlank() && plaintext.isNotBlank())
         val cleartext = plaintext.toByteArray(StandardCharsets.UTF_8)
         val messageId = java.util.UUID.randomUUID().toString()

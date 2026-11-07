@@ -99,7 +99,11 @@ class SignalSupabaseMessaging(
         }
     }
 
-    /** Independently ratchet-encrypt and submit to every verified device in the same peer account. */
+    /**
+     * Independently ratchet-encrypt and submit to every verified device linked to this local
+     * conversation. Direct chats are constrained by the runtime to one account; local groups may
+     * include several accounts, each reached through a separate pairwise Signal session.
+     */
     @Synchronized
     fun sendTextToDevices(
         recipients: List<VerifiedPeerTransportDeviceWithTransport>,

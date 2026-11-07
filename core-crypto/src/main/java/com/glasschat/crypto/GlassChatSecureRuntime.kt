@@ -303,8 +303,18 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
         val own = requireAccount()
         val localId = own.getString("id")
         val localDevice = requireLocalDevice(localId)
+        val localConversation = store.get("conversation", conversationId)
+            ?: error("Create or select a saved local conversation before verifying a peer")
         val candidate = store.get("device", candidateRecordId(peerTransportDeviceId))
             ?: error("Fetch the mutually approved contact device list first")
+        val existingAccounts = verifiedPeers().values
+            .filter { it.conversationId == conversationId }
+            .map { it.accountId }
+            .toSet()
+        check(localConversation.optString("kind") == "group" ||
+            existingAccounts.isEmpty() || existingAccounts == setOf(candidate.getString("accountId"))) {
+            "A one-to-one conversation can only include devices from one peer account. Create a group to verify multiple people."
+        }
         check(normalizeFingerprint(typedFingerprint) == normalizeFingerprint(candidate.getString("fingerprint"))) {
             "Fingerprint does not match. No one-time pre-key was fetched or consumed. Compare the full fingerprint with your contact out of band."
         }
@@ -348,10 +358,15 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
     @Synchronized
     fun send(conversationId: String, text: String): String {
         val own = requireAccount(); val local = requireLocalDevice(own.getString("id"))
+        val conversation = store.get("conversation", conversationId)
+            ?: error("This conversation is not saved on this device")
         val peers = verifiedPeers().filterValues { it.conversationId == conversationId }
         check(peers.isNotEmpty()) { "No verified peer session is linked to this conversation" }
-        check(peers.values.map { it.accountId }.distinct().size == 1) {
-            "This conversation is linked to more than one peer account; refusing ambiguous fan-out."
+        check(peers.values.all { it.conversationId == conversationId }) {
+            "Every recipient session must be verified for this exact conversation."
+        }
+        check(conversation.optString("kind") == "group" || peers.values.map { it.accountId }.distinct().size == 1) {
+            "A one-to-one conversation may only target one verified peer account."
         }
         val targets = peers.map { (transportId, peer) -> VerifiedPeerTransportDeviceWithTransport(transportId, peer) }
         val results = messaging(own.getString("id"), local).sendTextToDevices(targets, conversationId, text)

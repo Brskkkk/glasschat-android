@@ -67,6 +67,8 @@ fun LocalMessengerScreen(
     var selectedName by remember { mutableStateOf("") }
     var titleInput by remember { mutableStateOf("") }
     var contactInput by remember { mutableStateOf("") }
+    var groupMode by remember { mutableStateOf(false) }
+    var groupIdInput by remember { mutableStateOf("") }
     var messageInput by remember { mutableStateOf("") }
     var editingMessageId by remember { mutableStateOf<String?>(null) }
     var searchInput by remember { mutableStateOf("") }
@@ -672,26 +674,63 @@ fun LocalMessengerScreen(
             Panel {
                 ChatText("NEW CONVERSATION", Color.White, 16, FontWeight.SemiBold)
                 Spacer(Modifier.height(8.dp))
-                Entry(titleInput, { titleInput = it }, "Conversation name")
+                Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    SmallAction("One-to-one", { groupMode = false }, groupMode)
+                    SmallAction("Group", { groupMode = true }, !groupMode)
+                }
                 Spacer(Modifier.height(8.dp))
-                Entry(contactInput, { contactInput = it }, "Contact's GlassChat ID (stored locally only)")
+                Entry(titleInput, { titleInput = it }, if (groupMode) "Group name" else "Conversation name")
                 Spacer(Modifier.height(8.dp))
-                SmallAction("Save contact and start local conversation") {
-                    val label = titleInput.trim().ifBlank { contactInput.trim() }
-                    if (label.isBlank()) notice = "Enter a conversation name or contact ID."
+                if (groupMode) {
+                    Entry(groupIdInput, { groupIdInput = it.trim() }, "Shared group ID (optional; generated if blank)")
+                    Spacer(Modifier.height(5.dp))
+                    ChatText("Use the same ID on each member’s device, then add and verify each member’s devices in this conversation. Membership is managed locally; there’s no shared roster yet.", Color(0xFFBFC4D0), 11)
+                    if (groupIdInput.isNotBlank()) {
+                        Spacer(Modifier.height(6.dp))
+                        SmallAction("Copy group ID") {
+                            clipboard.setPrimaryClip(ClipData.newPlainText("GlassChat group ID", groupIdInput.trim()))
+                            notice = "Copied group ID. Share it with members; verify each peer fingerprint separately."
+                        }
+                    }
+                } else {
+                    Entry(contactInput, { contactInput = it }, "Contact's GlassChat ID (stored locally only)")
+                }
+                Spacer(Modifier.height(8.dp))
+                SmallAction(if (groupMode) "Create local group" else "Save contact and start local conversation") {
+                    val label = titleInput.trim().ifBlank { if (groupMode) "" else contactInput.trim() }
+                    val suppliedGroupId = groupIdInput.trim()
+                    val parsedGroupId = if (groupMode && suppliedGroupId.isNotBlank()) {
+                        try {
+                            val uuid = UUID.fromString(suppliedGroupId)
+                            if (uuid.toString().equals(suppliedGroupId, ignoreCase = true)) uuid.toString() else null
+                        } catch (_: IllegalArgumentException) { null }
+                    } else null
+                    if (label.isBlank()) notice = if (groupMode) "Enter a group name." else "Enter a conversation name or contact ID."
+                    else if (groupMode && suppliedGroupId.isNotBlank() && parsedGroupId == null) notice = "Enter a valid UUID group ID, or leave it blank to generate one."
                     else {
-                        val id = UUID.randomUUID().toString()
+                        val creatingGroup = groupMode
+                        val contactAddress = contactInput.trim()
+                        val id = if (creatingGroup) parsedGroupId ?: UUID.randomUUID().toString() else UUID.randomUUID().toString()
                         val now = System.currentTimeMillis()
-                        val conversation = JSONObject().put("id", id).put("name", label).put("createdAt", now).put("kind", "local")
+                        val conversation = JSONObject().put("id", id).put("name", label).put("createdAt", now)
+                            .put("kind", if (creatingGroup) "group" else "local")
                         executor.execute {
                             try {
+                                check(store.get("conversation", id) == null) { "A conversation with this group ID already exists on this device" }
                                 store.put("conversation", id, conversation, id, now)
-                                if (contactInput.isNotBlank()) {
+                                if (!creatingGroup && contactAddress.isNotBlank()) {
                                     val contactId = UUID.randomUUID().toString()
-                                    store.put("contact", contactId, JSONObject().put("id", contactId).put("label", label).put("glasschatId", contactInput.trim()).put("createdAt", now), null, now)
+                                    store.put("contact", contactId, JSONObject().put("id", contactId).put("label", label).put("glasschatId", contactAddress).put("createdAt", now), null, now)
                                 }
-                                main.post { titleInput = ""; contactInput = ""; notice = "Saved on this device only."; refreshChats(id); refreshContacts() }
-                            } catch (e: Exception) { main.post { notice = "Could not save locally: ${e.message ?: "storage error"}" } }
+                                main.post {
+                                    titleInput = ""
+                                    contactInput = ""
+                                    if (creatingGroup) groupIdInput = id
+                                    notice = if (creatingGroup) "Local group created. Share its ID, then verify every member’s devices; no server roster exists." else "Saved on this device only."
+                                    refreshChats(id)
+                                    refreshContacts()
+                                }
+                            } catch (e: Exception) { main.post { notice = "Could not create locally: ${e.message ?: "storage error"}" } }
                         }
                     }
                 }
@@ -750,6 +789,20 @@ fun LocalMessengerScreen(
             if (selectedId != null) Panel {
                 val selectedConversation = conversations.firstOrNull { it.optString("id") == selectedId }
                 ChatText(selectedName, Color.White, 17, FontWeight.SemiBold)
+                if (selectedConversation?.optString("kind") == "group") {
+                    val groupId = selectedConversation.optString("id")
+                    Spacer(Modifier.height(5.dp))
+                    ChatText("LOCAL GROUP · PAIRWISE ENCRYPTED PER VERIFIED DEVICE", theme.accent, 11, FontWeight.SemiBold)
+                    ChatText("Group ID: $groupId", Color(0xFFBFC4D0), 11)
+                    Spacer(Modifier.height(5.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        SmallAction("Copy group ID") {
+                            clipboard.setPrimaryClip(ClipData.newPlainText("GlassChat group ID", groupId))
+                            notice = "Copied group ID. Members need the same ID and individually verified peer devices."
+                        }
+                    }
+                    ChatText("There’s no shared roster or Sender-Key group ratchet yet. Each message is encrypted separately to the verified devices linked to this ID.", Color(0xFFBFC4D0), 11)
+                }
                 Spacer(Modifier.height(5.dp)); ChatText(
                     if (activeSecureSend != null) "Encrypted messaging · delivery state shown per message" else "Stored locally · not sent",
                     theme.accent, 12
