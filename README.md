@@ -1,28 +1,29 @@
-# GlassChat Android — work in progress
+# GlassChat Android preview
 
-This is the private source repository for the requested GlassChat Owner and Client apps. Both app entry points now include source wiring for Supabase Auth, invitations/device setup, verified Signal sessions, ciphertext-only relay messaging, and a best-effort WorkManager sync path. It is not yet a validated or production-ready messenger: the Supabase project is not configured, migrations are not deployed, and builds/tests/packaging remain paused as Jr requested.
+GlassChat has two separate Android application modules: GlassChat Owner (`com.glasschat.owner`) and GlassChat Client (`com.glasschat.client`). They share the Compose interface and secure-runtime source, but Owner includes additional owner-gated server controls and a local service-lifecycle panel. This is an implementation preview, not a completed or production-ready messenger.
 
-## Present in source (not build-verified)
+## Current preview contents
 
-- Separate `app-owner` and `app-client` modules/package IDs, sharing a Compose screen. The network-backed flow requires a deployed and reviewed Supabase project, initial Owner provisioning, and bilateral account/device setup.
-- Eight local theme presets, a validated custom accent color, and a local profile preview (display name, handle, about); these settings remain on-device and are not published.
-- A shared local-first conversation/contact/message UI with local search, drafts, edits/deletion, reactions, bookmarks, pin/archive/mute flags and private nicknames. The local controls are not synchronized; the verified Signal/Supabase send/receive path is a separate opt-in path and remains untested. The local theme picker includes eight presets plus a custom accent editor, not the full requested effect system or performance adaptation.
-- `SealedLocalStore`: payload JSON is AES-GCM encrypted with an Android Keystore key before writing to SQLite. Record kind, opaque ID, conversation ID and timestamp columns remain visible but are authenticated as AES-GCM associated data. A transactional source migration from the prior record format is present but unverified. This is local at-rest protection, not SQLCipher/full-database encryption and not E2EE.
-- Signal/libsignal identity, prekey and session state is sealed locally. The pipeline wraps ciphertext in a versioned envelope and atomically pairs ratchet advancement with its encrypted local outbox or received local message. The coordinator submits ciphertext to authenticated Supabase RPCs using idempotent delivery IDs and acknowledges inbound copies only after local persistence. These source paths have not been built or interoperably tested.
-- Supabase source integration for Auth, invitation redemption/Owner invitation creation, device registration, contact consent, public Signal prekeys, and authenticated per-device ciphertext relay. Migrations are un-deployed source and require security review; the initial Owner must be provisioned by a trusted operator. The separate phone-local registry remains a local prototype, not a remote administration system.
-- Owner foreground-service lifecycle/notification shell with Start/Pause/Resume/Stop actions, an opt-in boot-start setting that honors explicit Stop, and a persisted last-start timestamp. It does not listen for requests or host the relay. Both apps now schedule network-constrained encrypted polling/retry through WorkManager after peer verification; users can opt in to generic local notifications on newly saved messages (no sender/text preview). Android may defer polling; this is not FCM or real-time push.
-- Small inline file attachments: one non-empty file up to 512 KiB, including filename and MIME metadata, is carried inside the Signal-encrypted message payload and saved by the recipient only after choosing a destination. This is source-only and unvalidated; it is not streaming/blob storage, and large files, media previews, and voice are not supported.
+- Supabase Auth/account/device setup source; owner-created invitations; mutual contact consent; out-of-band Signal fingerprint verification; Signal libsignal sessions; a ciphertext-only relay and local encrypted message storage.
+- Per-verified-device direct-message encryption, local outbox/inbox, retry/polling, per-device stored/expired status, one-time prekey replenishment and signed EC/Kyber key rotation source.
+- Server-managed text groups with expiring invites, roster/membership controls, member removal and revocation, and atomic server acceptance of pairwise-encrypted copies for all verified devices.
+- One inline file per message, up to 512 KiB; it travels inside the Signal-encrypted message and the recipient chooses where to save it.
+- Local conversation/contact settings and theme/profile previews. Owner also has server-side account/device controls and a metadata-only admin audit view (when migrations are deployed), plus a local Owner service shell.
 
-## Still required by the supplied specification
+All listed network and cryptographic paths are source implementations. This preview build is the first compile/package pass; successful compilation does not mean Supabase is deployed, migrations are reviewed or applied, interoperability is proven, or live messaging works. The Owner foreground service does not host the account service or relay. There is no FCM: WorkManager polling is best effort and Android may defer it. Group encryption is pairwise fan-out, not Signal Sender-Key. The server-managed groups are distinct from local UUID-only groups. Large/streamed files, image/video/voice workflows, push, account recovery/backup, and several specification features are unfinished.
 
-The included source has not been compiled or security-audited. Live Supabase configuration/deployment and interoperability remain unverified; Owner phone hosting/public reachability, FCM/push, large/streamed media attachments, voice, and other requested features remain unfinished. Legacy local groups still use a shared UUID without a central roster. The server-managed text-group path now includes owner-only member removal and invite revocation, plus migration `0010`'s atomic batch RPC for pairwise Signal ciphertext to all currently verified recipient devices. It locks the roster during validation and accepts the new batch all-or-none; stale roster or invalid device coverage rejects the full batch. A removed member who rejoins cannot fetch older queued group ciphertext. Older app versions using migration `0009`'s one-copy RPC can still make partial fan-outs. This is not Sender-Key. Migrations `0001`–`0010` are source only and need review/deployment; do not consider the app complete from source inspection alone.
+See:
+- [Build, install and first-run setup](docs/BUILD_AND_INSTALL.md)
+- [Current implementation and remaining-work checklist](IMPLEMENTATION_STATUS.md)
+- [Supabase configuration, migrations and relay behavior](docs/SUPABASE_AND_RELAY.md)
+- [Crypto implementation and licensing notes](docs/CRYPTO_AND_LICENSE.md)
 
-The complete feature checklist and deployment limitations are in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+## Private source and preview release
 
-## Build and release
+Repository: <https://github.com/Brskkkk/glasschat-android>. It is intended to remain private; the release is a prerelease attached to that private repository and is not a public distribution. APKs in this preview use the Android debug signing configuration, not a production release key. Install only if you understand that the implementation is incomplete and unvalidated on devices.
 
-No new APK is available. A previous local Gradle attempt failed during `:app-owner:mergeDebugGlobalSynthetics` because required AndroidX/Guava artifacts were unavailable offline; an earlier online Gradle attempt ended before compilation. Per Jr's instruction, do not build, test, package APKs, or trigger CI until the requested feature implementation is complete and stable.
+## Security and live service caveats
 
-## Security
+Never put a Supabase service-role key, database password, signing private key or other secret in the app, repository, issue, release, or chat. The Android client should use only the Supabase Project URL and public anon key together with the signed-in user's access token. A trusted operator must review and apply migrations `0001` through `0010` in numeric order, configure Supabase Auth and provision the first Owner. The current task has not done this and has no dashboard access. The migrations are source requiring independent review, not a verified live schema or security audit.
 
-No service credentials, backend tokens, production signing keys or other secrets belong in this repository. No production signing configuration or backend credentials have been supplied. The currently implemented local store and queue do not make the app ready for real private communication.
+The app has not been phone-tested or independently audited. Debug APKs are not appropriate for production or broad distribution. Refer to the implementation checklist for exactly what has and has not been checked.
