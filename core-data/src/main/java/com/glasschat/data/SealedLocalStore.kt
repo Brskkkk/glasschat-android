@@ -318,6 +318,7 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
             writableDatabase.beginTransaction()
             try {
                 insertEncryptedRecord(writableDatabase, "invitation", id, null, now, row)
+                insertAuditEvent(writableDatabase, "invitation_created", "invitation", id, now)
                 writableDatabase.setTransactionSuccessful()
             } finally { writableDatabase.endTransaction() }
         }
@@ -365,6 +366,7 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
 
                 invitation.put("redeemedAt", now).put("redeemedAccountId", accountId)
                 updateEncryptedRecord(db, "invitation", invitationId, null, invitation.optLong("createdAt", now), invitation)
+                insertAuditEvent(db, "local_account_registered", "account", accountId, now)
                 db.setTransactionSuccessful()
                 return JSONObject(account.toString())
             } finally { db.endTransaction() }
@@ -404,6 +406,7 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
                     ?: throw IllegalArgumentException("Account does not exist in local registry")
                 check(account.optString("status") == "active") { "Account is not active" }
                 insertEncryptedRecord(db, "device", deviceId, null, now, record)
+                insertAuditEvent(db, "local_device_registered", "device", deviceId, now, accountId)
                 db.setTransactionSuccessful()
             } finally { db.endTransaction() }
         }
@@ -427,6 +430,7 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
                 if (device.optString("accountId") != accountId || device.optString("status") == "revoked") return false
                 device.put("status", "revoked").put("revokedAt", now).put("fcmToken", JSONObject.NULL)
                 updateEncryptedRecord(db, "device", deviceId, null, device.optLong("createdAt", now), device)
+                insertAuditEvent(db, "local_device_revoked", "device", deviceId, now, accountId)
                 db.setTransactionSuccessful()
                 return true
             } finally { db.endTransaction() }
@@ -459,8 +463,11 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
             db.beginTransaction()
             try {
                 val account = readRecord(db, "account", accountId) ?: return false
+                val previousStatus = account.optString("status", "unknown")
+                if (previousStatus == status) { db.setTransactionSuccessful(); return true }
                 account.put("status", status).put("updatedAt", now)
                 updateEncryptedRecord(db, "account", accountId, null, account.optLong("createdAt", now), account)
+                insertAuditEvent(db, "local_account_status_changed:$previousStatus->$status", "account", accountId, now)
                 db.setTransactionSuccessful()
                 return true
             } finally { db.endTransaction() }
@@ -479,10 +486,36 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
                 if (!invite.isNull("redeemedAt") || !invite.isNull("revokedAt")) return false
                 invite.put("revokedAt", now)
                 updateEncryptedRecord(db, "invitation", id, null, invite.optLong("createdAt", now), invite)
+                insertAuditEvent(db, "invitation_revoked", "invitation", id, now)
                 db.setTransactionSuccessful()
                 return true
             } finally { db.endTransaction() }
         }
+    }
+
+    /** Recent Owner actions are encrypted local audit entries, not server-authenticated evidence. */
+    fun localAdminAudit(limit: Int = 100): List<JSONObject> {
+        require(limit in 1..500)
+        return list("admin_audit").takeLast(limit).asReversed()
+    }
+
+    private fun insertAuditEvent(
+        db: SQLiteDatabase,
+        event: String,
+        subjectType: String,
+        subjectId: String?,
+        now: Long,
+        accountId: String? = null
+    ) {
+        val id = java.util.UUID.randomUUID().toString()
+        val payload = JSONObject()
+            .put("id", id)
+            .put("event", event.take(100))
+            .put("subjectType", subjectType)
+            .put("subjectId", subjectId ?: JSONObject.NULL)
+            .put("accountId", accountId ?: JSONObject.NULL)
+            .put("createdAt", now)
+        insertEncryptedRecord(db, "admin_audit", id, null, now, payload)
     }
 
     private fun accountUsernameExists(db: SQLiteDatabase, username: String): Boolean {
@@ -637,6 +670,6 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
         private const val MAX_ENVELOPE_BYTES = 1024 * 1024
         private const val MAX_RELAY_RETENTION_MS = 7L * 24 * 60 * 60 * 1000
         private const val MAX_INVITATION_LIFETIME_MS = 30L * 24 * 60 * 60 * 1000
-        private val ALLOWED_KINDS = setOf("conversation", "message", "contact", "draft", "setting", "reaction", "saved", "relay_delivery", "account", "invitation", "device")
+        private val ALLOWED_KINDS = setOf("conversation", "message", "contact", "draft", "setting", "reaction", "saved", "relay_delivery", "account", "invitation", "device", "admin_audit")
     }
 }

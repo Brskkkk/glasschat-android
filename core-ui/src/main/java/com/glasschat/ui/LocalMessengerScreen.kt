@@ -50,6 +50,7 @@ fun LocalMessengerScreen(
     val conversations = remember { mutableStateListOf<JSONObject>() }
     val contacts = remember { mutableStateListOf<JSONObject>() }
     val ownerAccounts = remember { mutableStateListOf<JSONObject>() }
+    val ownerAudit = remember { mutableStateListOf<JSONObject>() }
     val nicknameInputs = remember { mutableStateMapOf<String, String>() }
     val messages = remember { mutableStateListOf<JSONObject>() }
     var selectedId by remember { mutableStateOf<String?>(null) }
@@ -84,6 +85,18 @@ fun LocalMessengerScreen(
         }
     }
 
+    fun refreshOwnerAudit() {
+        if (!owner) return
+        executor.execute {
+            try {
+                val rows = store.localAdminAudit(100)
+                main.post { ownerAudit.clear(); ownerAudit.addAll(rows) }
+            } catch (e: Exception) {
+                main.post { notice = "Could not open local audit history: ${e.message ?: "storage error"}" }
+            }
+        }
+    }
+
     fun refreshOwnerAccounts() {
         if (!owner) return
         executor.execute {
@@ -94,6 +107,7 @@ fun LocalMessengerScreen(
                 main.post { notice = "Could not open the local account registry: ${e.message ?: "storage error"}" }
             }
         }
+        refreshOwnerAudit()
     }
 
     fun refreshChats(selectId: String? = selectedId) {
@@ -123,6 +137,7 @@ fun LocalMessengerScreen(
         refreshChats(null)
         refreshContacts()
         refreshOwnerAccounts()
+        refreshOwnerAudit()
         executor.execute {
             val savedTheme = try { store.get("setting", "theme")?.optString("id") } catch (_: Exception) { null }
             if (!savedTheme.isNullOrBlank()) main.post { themeId = savedTheme }
@@ -195,7 +210,7 @@ fun LocalMessengerScreen(
                     executor.execute {
                         try {
                             val code = store.createLocalInvitation(System.currentTimeMillis() + 7L * 24 * 60 * 60 * 1000)
-                            main.post { newInviteCode = code; notice = "Invitation created. Only its digest is stored, so save the code now." }
+                            main.post { newInviteCode = code; notice = "Invitation created. Only its digest is stored, so save the code now."; refreshOwnerAudit() }
                         } catch (e: Exception) { main.post { notice = "Could not create local invitation: ${e.message ?: "storage error"}" } }
                     }
                 }
@@ -223,6 +238,7 @@ fun LocalMessengerScreen(
                                     revokeInviteInput = ""
                                     if (revoked && newInviteCode == code) newInviteCode = ""
                                     notice = if (revoked) "Local invitation revoked." else "Invitation was not found, was already used, or was already revoked."
+                                    refreshOwnerAudit()
                                 }
                             } catch (e: Exception) { main.post { notice = "Could not revoke invitation: ${e.message ?: "storage error"}" } }
                         }
@@ -247,11 +263,28 @@ fun LocalMessengerScreen(
                             executor.execute {
                                 try {
                                     val changed = store.setLocalAccountStatus(accountId, next)
-                                    main.post { notice = if (changed) "Local account marked $next." else "Local account was not found."; refreshOwnerAccounts() }
+                                    main.post { notice = if (changed) "Local account marked $next." else "Local account was not found."; refreshOwnerAccounts(); refreshOwnerAudit() }
                                 } catch (e: Exception) { main.post { notice = "Could not update local account: ${e.message ?: "storage error"}" } }
                             }
                         }, true)
                     }
+                }
+            }
+            if (owner) Panel {
+                ChatText("LOCAL ADMIN AUDIT", Color.White, 16, FontWeight.SemiBold)
+                Spacer(Modifier.height(4.dp))
+                ChatText("Recent registry changes recorded on this phone only; not server-authenticated.", Color(0xFFBFC4D0), 12)
+                if (ownerAudit.isEmpty()) {
+                    Spacer(Modifier.height(6.dp)); ChatText("No local admin events yet.", Color(0xFFBFC4D0), 12)
+                }
+                ownerAudit.take(20).forEach { event ->
+                    val eventName = event.optString("event").replace('_', ' ').replace(':', ' ')
+                    val whenText = java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT, java.text.DateFormat.SHORT)
+                        .format(java.util.Date(event.optLong("createdAt")))
+                    Spacer(Modifier.height(7.dp))
+                    ChatText("$eventName · $whenText", Color.White, 12, FontWeight.Medium)
+                    val subject = event.optString("subjectId")
+                    if (subject.isNotBlank() && subject != "null") ChatText("${event.optString("subjectType")}: $subject", Color(0xFFBFC4D0), 10)
                 }
             }
             Panel {
