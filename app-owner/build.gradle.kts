@@ -4,11 +4,13 @@ android { namespace = "com.glasschat.owner"; compileSdk = 35
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
 }
 dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
     implementation(project(":core-ui"))
     implementation(project(":core-data"))
     implementation(project(":core-crypto"))
