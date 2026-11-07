@@ -80,6 +80,8 @@ class GlassChatOwnerService : Service() {
             buildNotification(),
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) ServiceInfoCompat.TYPE_SPECIAL_USE else 0
         )
+        preferences().edit().putLong(KEY_LAST_STARTED_AT, System.currentTimeMillis()).apply()
+        updateNotification()
     }
 
     private fun createChannel() {
@@ -108,15 +110,16 @@ class GlassChatOwnerService : Service() {
             this, 2, Intent(this, GlassChatOwnerService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val checkedAt = DateTimeFormatter.ofPattern("HH:mm:ss")
-            .withZone(ZoneId.systemDefault()).format(lastStartedAt ?: Instant.now())
+        val lastStart = preferences().getLong(KEY_LAST_STARTED_AT, 0L)
+        val lastStartClock = if (lastStart > 0L) DateTimeFormatter.ofPattern("HH:mm:ss")
+            .withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(lastStart)) else "not started yet"
         val statusText = if (state.value == STATUS_PAUSED) "Paused · backend not configured" else "Foreground service active · backend not configured"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
             .setContentTitle("GlassChat Owner Server")
             .setContentText(statusText)
             .setStyle(NotificationCompat.BigTextStyle().bigText(
-                "$statusText\nAccount service: unavailable\nRelay: unavailable\nLocal service start: $checkedAt"
+                "$statusText\nAccount service: unavailable\nRelay: unavailable\nLocal service start: $lastStartClock"
             ))
             .setContentIntent(open)
             .setOngoing(true)
@@ -129,7 +132,6 @@ class GlassChatOwnerService : Service() {
 
     private fun publishState(value: String) {
         state.value = value
-        if (value == STATUS_ACTIVE) lastStartedAt = Instant.now()
     }
 
     private fun updateNotification() {
@@ -157,9 +159,27 @@ class GlassChatOwnerService : Service() {
         private const val PREFERENCES = "owner_service_state"
         private const val KEY_STOPPED = "explicitly_stopped"
         private const val KEY_PAUSED = "paused"
-        private var lastStartedAt: Instant? = null
+        private const val KEY_AUTO_START = "auto_start_after_reboot"
+        private const val KEY_LAST_STARTED_AT = "last_started_at"
         private val state = MutableStateFlow(STATUS_STOPPED)
         val status: StateFlow<String> = state
+
+        fun isAutoStartEnabled(context: android.content.Context): Boolean =
+            context.getSharedPreferences(PREFERENCES, android.content.Context.MODE_PRIVATE).getBoolean(KEY_AUTO_START, false)
+
+        fun setAutoStartEnabled(context: android.content.Context, enabled: Boolean) {
+            val prefs = context.getSharedPreferences(PREFERENCES, android.content.Context.MODE_PRIVATE)
+            val editor = prefs.edit().putBoolean(KEY_AUTO_START, enabled)
+            // Enabling this setting is an explicit owner choice to allow the next boot startup.
+            if (enabled) editor.putBoolean(KEY_STOPPED, false)
+            editor.apply()
+        }
+
+        fun wasExplicitlyStopped(context: android.content.Context): Boolean =
+            context.getSharedPreferences(PREFERENCES, android.content.Context.MODE_PRIVATE).getBoolean(KEY_STOPPED, false)
+
+        fun lastStartTimeMillis(context: android.content.Context): Long =
+            context.getSharedPreferences(PREFERENCES, android.content.Context.MODE_PRIVATE).getLong(KEY_LAST_STARTED_AT, 0L)
     }
 }
 

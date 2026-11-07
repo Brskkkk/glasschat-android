@@ -40,7 +40,10 @@ fun LocalMessengerScreen(
     onStartServer: () -> Unit = {},
     onPauseServer: () -> Unit = {},
     onResumeServer: () -> Unit = {},
-    onStopServer: () -> Unit = {}
+    onStopServer: () -> Unit = {},
+    autoStartEnabled: Boolean = false,
+    lastServerStartMillis: Long = 0L,
+    onAutoStartChanged: (Boolean) -> Unit = {}
 ) {
     val appContext = context.applicationContext
     val clipboard = remember(appContext) { appContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager }
@@ -269,6 +272,12 @@ fun LocalMessengerScreen(
                     SmallAction("Resume", onResumeServer, true)
                     SmallAction("Stop", onStopServer, true)
                 }
+                Spacer(Modifier.height(10.dp))
+                ChatText("Last service start: ${if (lastServerStartMillis > 0L) java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT, java.text.DateFormat.SHORT).format(java.util.Date(lastServerStartMillis)) else "not started"}", Color(0xFFBFC4D0), 12)
+                Spacer(Modifier.height(8.dp))
+                SmallAction(if (autoStartEnabled) "Auto-start after reboot: ON" else "Auto-start after reboot: OFF", { onAutoStartChanged(!autoStartEnabled) }, !autoStartEnabled)
+                Spacer(Modifier.height(4.dp))
+                ChatText("Opt-in only. Android may block or delay startup; force-stop requires reopening the app. Stop Server suppresses automatic restart until you start again or re-enable this setting.", Color(0xFFBFC4D0), 11)
             }
             if (owner) Panel {
                 ChatText("LOCAL REGISTRY · OWNER DEVICE ONLY", Color.White, 16, FontWeight.SemiBold)

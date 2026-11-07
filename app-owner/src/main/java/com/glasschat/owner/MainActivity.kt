@@ -8,6 +8,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -18,6 +19,8 @@ import com.glasschat.ui.LocalMessengerScreen
 
 class MainActivity : ComponentActivity() {
     private var notice by mutableStateOf("")
+    private var autoStartEnabled by mutableStateOf(false)
+    private var lastServerStartMillis by mutableStateOf(0L)
     private val askNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) startGlassChatOwnerService()
         else notice = "Notifications are off, so the foreground service notification cannot be shown. Allow notifications before starting the server service."
@@ -25,8 +28,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        autoStartEnabled = GlassChatOwnerService.isAutoStartEnabled(this)
+        lastServerStartMillis = GlassChatOwnerService.lastStartTimeMillis(this)
         setContent {
             val serviceStatus by GlassChatOwnerService.status.collectAsState()
+            LaunchedEffect(serviceStatus) {
+                if (serviceStatus == GlassChatOwnerService.STATUS_ACTIVE) {
+                    lastServerStartMillis = GlassChatOwnerService.lastStartTimeMillis(this@MainActivity)
+                }
+            }
             LocalMessengerScreen(
                 context = LocalContext.current,
                 owner = true,
@@ -35,7 +45,14 @@ class MainActivity : ComponentActivity() {
                 onStartServer = ::requestStart,
                 onPauseServer = { sendServiceAction(GlassChatOwnerService.ACTION_PAUSE) },
                 onResumeServer = { sendServiceAction(GlassChatOwnerService.ACTION_RESUME) },
-                onStopServer = { sendServiceAction(GlassChatOwnerService.ACTION_STOP) }
+                onStopServer = { sendServiceAction(GlassChatOwnerService.ACTION_STOP) },
+                autoStartEnabled = autoStartEnabled,
+                lastServerStartMillis = lastServerStartMillis,
+                onAutoStartChanged = { enabled ->
+                    GlassChatOwnerService.setAutoStartEnabled(this, enabled)
+                    autoStartEnabled = enabled
+                    notice = if (enabled) "Automatic startup enabled by your choice. Android may still restrict it." else "Automatic startup disabled."
+                }
             )
         }
     }
