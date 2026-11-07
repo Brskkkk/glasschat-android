@@ -29,7 +29,7 @@ create table if not exists public.gc_devices (
 
 -- Public protocol material only. Private identity/prekey material must stay on the device.
 -- Clients can read/write only their own row through RLS; there is no cross-account read policy.
--- A contact-authorized bundle endpoint still needs active-contact/device checks.
+-- Cross-account reads stay blocked until a contact-authorized bundle endpoint performs active-contact/device checks.
 create table if not exists public.gc_signal_public_prekeys (
     account_id uuid not null,
     device_id uuid not null,
@@ -173,5 +173,5 @@ grant execute on function public.gc_redeem_invitation(text, text, text) to authe
 
 comment on table public.gc_accounts is 'GlassChat account metadata linked to Supabase Auth; never message bodies.';
 comment on table public.gc_devices is 'Device metadata and public identity keys only; no private keys.';
-comment on table public.gc_signal_public_prekeys is 'Signal public prekey material; direct reads remain disabled pending contact-checked bundle API.';
+comment on table public.gc_signal_public_prekeys is 'Signal public signed/Kyber prekey material; cross-account reads remain blocked pending a contact-checked bundle API.';
 comment on table public.gc_invitations is 'Only SHA-256 digests of one-time invitation codes; no message payloads.';

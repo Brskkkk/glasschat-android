@@ -185,7 +185,7 @@ fun LocalMessengerScreen(
             Panel {
                 ChatText("LOCAL-ONLY FOUNDATION", theme.accent, 11, FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
-                ChatText("Messages and contact records are saved encrypted on this device. This build does not send messages or implement end-to-end encryption; nothing reaches another person yet.", Color(0xFFE8E9F0), 14)
+                ChatText("Live messaging is unavailable: no authenticated relay or verified Signal session is connected. Saving here keeps a local-only copy; there is no plaintext send fallback.", Color(0xFFE8E9F0), 14)
             }
             Panel {
                 ChatText("THEME STUDIO", Color.White, 16, FontWeight.SemiBold)

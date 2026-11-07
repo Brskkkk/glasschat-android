@@ -1,5 +1,6 @@
 package com.glasschat.crypto
 
+import org.signal.libsignal.protocol.IdentityKey
 import org.signal.libsignal.protocol.SessionBuilder
 import org.signal.libsignal.protocol.SessionCipher
 import org.signal.libsignal.protocol.SignalProtocolAddress
@@ -7,7 +8,6 @@ import org.signal.libsignal.protocol.message.CiphertextMessage
 import org.signal.libsignal.protocol.message.PreKeySignalMessage
 import org.signal.libsignal.protocol.message.SignalMessage
 import org.signal.libsignal.protocol.state.PreKeyBundle
-import org.signal.libsignal.protocol.state.SignalProtocolStore
 
 /**
  * Opaque Signal Protocol ciphertext for exactly one recipient device. The type byte is required
@@ -35,24 +35,48 @@ class SignalCiphertextEnvelope(type: Int, serializedMessage: ByteArray) {
 }
 
 /**
- * Thin adapter over Signal's maintained implementation. A caller must supply a durable,
- * encrypted SignalProtocolStore and an authenticated, verified PreKeyBundle. This class does
- * not implement keys, ratchets, serialization, or cryptography itself.
+ * Thin adapter over Signal's maintained implementation. It requires the Keystore-encrypted store
+ * and an expected peer identity key that the caller obtained through authenticated account lookup
+ * and explicit contact verification. It checks both signatures in the supplied bundle and pins the
+ * identity before session setup. It cannot authenticate the transport or provide verification UI;
+ * no app message path currently invokes it.
  *
  * Calls are serialized per instance because libsignal's SessionBuilder and SessionCipher are
  * documented as not thread-safe. Use a separate adapter per protocol store, not per coroutine.
  */
-class SignalSessionCrypto(private val protocolStore: SignalProtocolStore) {
+class SignalSessionCrypto(private val protocolStore: SealedSignalProtocolStore) {
     @Synchronized
     fun establishSession(
         localAccountId: String,
         localSignalDeviceId: Int,
         remoteAccountId: String,
         remoteSignalDeviceId: Int,
-        verifiedBundle: PreKeyBundle
+        verifiedBundle: PreKeyBundle,
+        trustedIdentityKey: IdentityKey
     ) {
+        protocolStore.requireProvisionedIdentity(localAccountId, localSignalDeviceId)
         val local = address(localAccountId, localSignalDeviceId)
         val remote = address(remoteAccountId, remoteSignalDeviceId)
+        require(verifiedBundle.deviceId == remoteSignalDeviceId) { "Pre-key bundle device does not match the authenticated peer device" }
+        require(verifiedBundle.identityKey == trustedIdentityKey) { "Pre-key bundle identity does not match the verified contact identity" }
+        val signedKeyBytes = verifiedBundle.signedPreKey.serialize()
+        val signedKeySignature = verifiedBundle.signedPreKeySignature
+        val kyberKeyBytes = verifiedBundle.kyberPreKey.serialize()
+        val kyberKeySignature = verifiedBundle.kyberPreKeySignature
+        try {
+            require(trustedIdentityKey.publicKey.verifySignature(signedKeyBytes, signedKeySignature)) {
+                "Signal signed pre-key signature is invalid"
+            }
+            require(trustedIdentityKey.publicKey.verifySignature(kyberKeyBytes, kyberKeySignature)) {
+                "Signal Kyber pre-key signature is invalid"
+            }
+        } finally {
+            signedKeyBytes.fill(0)
+            signedKeySignature.fill(0)
+            kyberKeyBytes.fill(0)
+            kyberKeySignature.fill(0)
+        }
+        protocolStore.pinVerifiedIdentity(remote, trustedIdentityKey)
         SessionBuilder(protocolStore, remote, local).process(verifiedBundle)
     }
 
@@ -68,8 +92,11 @@ class SignalSessionCrypto(private val protocolStore: SignalProtocolStore) {
         require(plaintext.size <= SignalCiphertextEnvelope.MAX_SERIALIZED_MESSAGE_BYTES) {
             "Message exceeds the supported size"
         }
+        protocolStore.requireProvisionedIdentity(localAccountId, localSignalDeviceId)
         val local = address(localAccountId, localSignalDeviceId)
         val remote = address(remoteAccountId, remoteSignalDeviceId)
+        check(protocolStore.getIdentity(remote) != null) { "Peer identity has not been verified" }
+        check(protocolStore.containsSession(remote)) { "No verified Signal session is available" }
         val plaintextCopy = plaintext.copyOf()
         try {
             val message = SessionCipher(protocolStore, local, remote).encrypt(plaintextCopy)
@@ -92,8 +119,11 @@ class SignalSessionCrypto(private val protocolStore: SignalProtocolStore) {
         remoteSignalDeviceId: Int,
         envelope: SignalCiphertextEnvelope
     ): ByteArray {
+        protocolStore.requireProvisionedIdentity(localAccountId, localSignalDeviceId)
         val local = address(localAccountId, localSignalDeviceId)
         val remote = address(remoteAccountId, remoteSignalDeviceId)
+        check(protocolStore.getIdentity(remote) != null) { "Peer identity has not been verified" }
+        check(protocolStore.containsSession(remote)) { "No verified Signal session is available" }
         val cipher = SessionCipher(protocolStore, local, remote)
         val serialized = envelope.serializedMessage
         try {

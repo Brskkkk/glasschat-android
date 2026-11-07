@@ -9,7 +9,10 @@ import org.signal.libsignal.protocol.InvalidMessageException
 import org.signal.libsignal.protocol.NoSessionException
 import org.signal.libsignal.protocol.ReusedBaseKeyException
 import org.signal.libsignal.protocol.SignalProtocolAddress
+import org.signal.libsignal.protocol.ecc.ECKeyPair
 import org.signal.libsignal.protocol.ecc.ECPublicKey
+import org.signal.libsignal.protocol.kem.KEMKeyPair
+import org.signal.libsignal.protocol.kem.KEMKeyType
 import org.signal.libsignal.protocol.groups.state.SenderKeyRecord
 import org.signal.libsignal.protocol.state.IdentityKeyStore
 import org.signal.libsignal.protocol.state.KyberPreKeyRecord
@@ -30,9 +33,10 @@ import java.util.concurrent.ConcurrentHashMap
  * database row identifier is a digest; account, address, key ID, protocol category, and serialized
  * key/session bytes are inside the authenticated encrypted payload.
  *
- * This is protocol-state persistence only. It does not generate/publish prekeys, authenticate a
- * peer or bundle, provide identity-verification UI, or wire encryption into app messaging. The
- * existing Android Keystore key protects these records at rest; it is not a Signal identity key.
+ * The initial provisioning helper generates and persists local Signal identity/prekey material,
+ * returning only public upload data. It does not publish that data, authenticate an account or peer,
+ * provide identity-verification UI, replenish/rotate keys, or wire encryption into app messaging.
+ * The existing Android Keystore key protects these records at rest; it is not a Signal identity key.
  *
  * Kyber records stored through [storeKyberPreKey] are one-time; use
  * [storeLastResortKyberPreKey] for a persistent last-resort record so Signal's reuse-tuple check
@@ -48,6 +52,128 @@ class SealedSignalProtocolStore(
         require(localAccountId.isNotBlank() && localAccountId.length <= 128) {
             "Invalid local account identifier"
         }
+    }
+
+    /**
+     * Generate an initial Signal identity and pre-key set, persisting all private material before
+     * returning public-only upload data. Call only after the app has an authenticated local account
+     * identity and a stable Signal device ID. This does not publish keys or establish trust.
+     *
+     * Initial keys use a fixed ID range because no publication can occur until this method returns
+     * successfully and sets its durable completion marker. A retry after a partial local write can
+     * safely finish the unpublished set. Once marked ready, missing key material is treated as
+     * corruption/consumption, never silently regenerated under an old ID.
+     */
+    fun provisionInitialPublicPreKeys(signalDeviceId: Int): SignalPublicPreKeyBundle = synchronized(lock) {
+        require(signalDeviceId in MIN_SIGNAL_DEVICE_ID..MAX_SIGNAL_DEVICE_ID) {
+            "Signal device ID must be between 1 and 127"
+        }
+        val readyRecord = localStore.get(RECORD_KIND, rowId(INITIAL_KEYS_READY, SINGLETON_KEY))
+        if (readyRecord != null) {
+            val ready = decodePayload(readyRecord, INITIAL_KEYS_READY, SINGLETON_KEY)
+            check(ready.optInt("deviceId") == signalDeviceId) {
+                "This Signal identity is already bound to a different device ID"
+            }
+            check(ready.optInt("oneTimeCount") == INITIAL_ONE_TIME_PREKEY_COUNT) {
+                "Saved initial Signal pre-key manifest is invalid"
+            }
+        } else {
+            val identity = getIdentityKeyPair()
+            for (id in 1..INITIAL_ONE_TIME_PREKEY_COUNT) {
+                if (!containsPreKey(id)) {
+                    val keyPair = ECKeyPair.generate()
+                    storePreKey(id, PreKeyRecord(id, keyPair))
+                }
+            }
+            if (!containsSignedPreKey(INITIAL_SIGNED_PREKEY_ID)) {
+                val keyPair = ECKeyPair.generate()
+                val publicBytes = keyPair.publicKey.serialize()
+                val signature = try { identity.privateKey.calculateSignature(publicBytes) }
+                finally { publicBytes.fill(0) }
+                try {
+                    storeSignedPreKey(
+                        INITIAL_SIGNED_PREKEY_ID,
+                        SignedPreKeyRecord(INITIAL_SIGNED_PREKEY_ID, System.currentTimeMillis(), keyPair, signature)
+                    )
+                } finally { signature.fill(0) }
+            }
+            if (!containsKyberPreKey(INITIAL_KYBER_PREKEY_ID)) {
+                val keyPair = KEMKeyPair.generate(KEMKeyType.KYBER_1024)
+                val publicBytes = keyPair.publicKey.serialize()
+                val signature = try { identity.privateKey.calculateSignature(publicBytes) }
+                finally { publicBytes.fill(0) }
+                try {
+                    storeLastResortKyberPreKey(
+                        INITIAL_KYBER_PREKEY_ID,
+                        KyberPreKeyRecord(INITIAL_KYBER_PREKEY_ID, System.currentTimeMillis(), keyPair, signature)
+                    )
+                } finally { signature.fill(0) }
+            }
+            writeJson(INITIAL_KEYS_READY, SINGLETON_KEY, JSONObject()
+                .put("deviceId", signalDeviceId)
+                .put("oneTimeCount", INITIAL_ONE_TIME_PREKEY_COUNT)
+                .put("createdAt", System.currentTimeMillis()))
+        }
+
+        val identity = getIdentityKeyPair()
+        val signed = loadSignedPreKey(INITIAL_SIGNED_PREKEY_ID)
+        val kyber = loadKyberPreKey(INITIAL_KYBER_PREKEY_ID)
+        val signedPublic = signed.keyPair.publicKey.serialize()
+        val signedSignature = signed.signature
+        val kyberPublic = kyber.keyPair.publicKey.serialize()
+        val kyberSignature = kyber.signature
+        try {
+            SignalPublicPreKeyBundle(
+                registrationId = getLocalRegistrationId(),
+                deviceId = signalDeviceId,
+                identityKey = identity.publicKey.serialize(),
+                signedPreKey = SignalPublicKeyMaterial(INITIAL_SIGNED_PREKEY_ID, signedPublic, signedSignature),
+                kyberLastResortPreKey = SignalPublicKeyMaterial(INITIAL_KYBER_PREKEY_ID, kyberPublic, kyberSignature),
+                oneTimePreKeys = (1..INITIAL_ONE_TIME_PREKEY_COUNT).mapNotNull { id ->
+                    if (!containsPreKey(id)) return@mapNotNull null
+                    val public = loadPreKey(id).keyPair.publicKey.serialize()
+                    try { SignalPublicKeyMaterial(id, public) } finally { public.fill(0) }
+                }
+            )
+        } finally {
+            signedPublic.fill(0)
+            signedSignature.fill(0)
+            kyberPublic.fill(0)
+            kyberSignature.fill(0)
+        }
+    }
+
+    /** Fail closed unless this store is provisioned for the authenticated local account/device. */
+    fun requireProvisionedIdentity(accountId: String, signalDeviceId: Int) = synchronized(lock) {
+        require(accountId.isNotBlank() && accountId.length <= 128) { "Invalid local account identifier" }
+        require(signalDeviceId in MIN_SIGNAL_DEVICE_ID..MAX_SIGNAL_DEVICE_ID) {
+            "Signal device ID must be between 1 and 127"
+        }
+        check(accountId == localAccountId) { "Signal store does not belong to the authenticated local account" }
+        val readyRecord = localStore.get(RECORD_KIND, rowId(INITIAL_KEYS_READY, SINGLETON_KEY))
+            ?: error("Local Signal identity and prekeys are not provisioned")
+        val ready = decodePayload(readyRecord, INITIAL_KEYS_READY, SINGLETON_KEY)
+        check(ready.optInt("deviceId") == signalDeviceId) {
+            "Local Signal identity is bound to a different device ID"
+        }
+    }
+
+    /** Pin a peer identity only after the caller has authenticated the account and completed trust verification. */
+    fun pinVerifiedIdentity(address: SignalProtocolAddress, identityKey: IdentityKey) = synchronized(lock) {
+        val key = addressKey(address)
+        val candidate = identityKey.serialize()
+        try {
+            val existing = readBytes(REMOTE_IDENTITY, key)
+            if (existing != null) {
+                try {
+                    check(existing.contentEquals(candidate)) {
+                        "Peer identity changed; explicit re-verification is required before replacing it"
+                    }
+                } finally { existing.fill(0) }
+            } else {
+                writeBytes(REMOTE_IDENTITY, key, candidate)
+            }
+        } finally { candidate.fill(0) }
     }
 
     override fun getIdentityKeyPair(): IdentityKeyPair = synchronized(lock) {
@@ -82,13 +208,18 @@ class SealedSignalProtocolStore(
         val previous = readBytes(REMOTE_IDENTITY, key)
         val serialized = identityKey.serialize()
         val changed = previous != null && !previous.contentEquals(serialized)
-        previous?.fill(0)
-        writeBytes(REMOTE_IDENTITY, key, serialized)
+        try {
+            check(!changed) { "Peer identity changed; explicit re-verification is required before replacing it" }
+            writeBytes(REMOTE_IDENTITY, key, serialized)
+        } finally {
+            previous?.fill(0)
+            serialized.fill(0)
+        }
         if (changed) IdentityKeyStore.IdentityChange.REPLACED_EXISTING else IdentityKeyStore.IdentityChange.NEW_OR_UNCHANGED
     }
 
     override fun isTrustedIdentity(address: SignalProtocolAddress, identityKey: IdentityKey, direction: IdentityKeyStore.Direction): Boolean = synchronized(lock) {
-        val saved = readBytes(REMOTE_IDENTITY, addressKey(address)) ?: return@synchronized true
+        val saved = readBytes(REMOTE_IDENTITY, addressKey(address)) ?: return@synchronized false
         try {
             val candidate = identityKey.serialize()
             try {
@@ -402,6 +533,12 @@ class SealedSignalProtocolStore(
         const val MAX_REGISTRATION_ID = 16380
         const val PRIMARY_DEVICE_ID = 1
         const val IDENTITY_PAIR = "identity_pair"
+        const val INITIAL_KEYS_READY = "initial_keys_ready"
+        const val INITIAL_ONE_TIME_PREKEY_COUNT = 100
+        const val INITIAL_SIGNED_PREKEY_ID = 1
+        const val INITIAL_KYBER_PREKEY_ID = 1
+        const val MIN_SIGNAL_DEVICE_ID = 1
+        const val MAX_SIGNAL_DEVICE_ID = 127
         const val REGISTRATION_ID = "registration_id"
         const val REMOTE_IDENTITY = "remote_identity"
         const val PRE_KEY = "pre_key"
