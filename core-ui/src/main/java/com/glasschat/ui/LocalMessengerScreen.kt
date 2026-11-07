@@ -43,7 +43,9 @@ fun LocalMessengerScreen(
     onStopServer: () -> Unit = {},
     autoStartEnabled: Boolean = false,
     lastServerStartMillis: Long = 0L,
-    onAutoStartChanged: (Boolean) -> Unit = {}
+    onAutoStartChanged: (Boolean) -> Unit = {},
+    secureSend: ((conversationId: String, text: String) -> String)? = null,
+    secureReceive: (() -> String)? = null
 ) {
     val appContext = context.applicationContext
     val clipboard = remember(appContext) { appContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager }
@@ -183,9 +185,15 @@ fun LocalMessengerScreen(
             ChatText("GLASSCHAT  ${if (owner) "OWNER" else "CLIENT"}", Color.White, 13, FontWeight.Bold)
             ChatText("Your private space", Color.White, 28, FontWeight.SemiBold)
             Panel {
-                ChatText("LOCAL-ONLY FOUNDATION", theme.accent, 11, FontWeight.Bold)
+                ChatText(if (secureSend != null && secureReceive != null) "SECURE MESSAGING CONTROLS AVAILABLE" else "LOCAL-ONLY FOUNDATION", theme.accent, 11, FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
-                ChatText("Live messaging is unavailable: no authenticated relay or verified Signal session is connected. Saving here keeps a local-only copy; there is no plaintext send fallback.", Color(0xFFE8E9F0), 14)
+                ChatText(
+                    if (secureSend != null && secureReceive != null)
+                        "The configured secure messaging callbacks use Signal ciphertext and authenticated relay status; recipient receipt is shown separately."
+                    else
+                        "Live messaging is unavailable: no authenticated relay or verified Signal session is connected. Saving here keeps a local-only copy; there is no plaintext send fallback.",
+                    Color(0xFFE8E9F0), 14
+                )
             }
             Panel {
                 ChatText("THEME STUDIO", Color.White, 16, FontWeight.SemiBold)
@@ -446,7 +454,10 @@ fun LocalMessengerScreen(
             if (selectedId != null) Panel {
                 val selectedConversation = conversations.firstOrNull { it.optString("id") == selectedId }
                 ChatText(selectedName, Color.White, 17, FontWeight.SemiBold)
-                Spacer(Modifier.height(5.dp)); ChatText("Stored locally · not sent", theme.accent, 12)
+                Spacer(Modifier.height(5.dp)); ChatText(
+                    if (secureSend != null) "Encrypted messaging · delivery state shown per message" else "Stored locally · not sent",
+                    theme.accent, 12
+                )
                 Spacer(Modifier.height(7.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf("pinned" to "Pin", "archived" to "Archive", "muted" to "Mute").forEach { (flag, label) ->
@@ -463,6 +474,20 @@ fun LocalMessengerScreen(
                     }
                 }
                 Spacer(Modifier.height(8.dp))
+                if (secureReceive != null) {
+                    SmallAction("Check encrypted messages", {
+                        executor.execute {
+                            try {
+                                val result = secureReceive.invoke()
+                                val conversationId = selectedId
+                                main.post { notice = result; if (conversationId != null) refreshChats(conversationId) }
+                            } catch (_: Exception) {
+                                main.post { notice = "Could not receive encrypted messages; no relay copy was acknowledged." }
+                            }
+                        }
+                    })
+                    Spacer(Modifier.height(8.dp))
+                }
                 if (messages.isEmpty()) ChatText("No messages yet.", Color(0xFFBFC4D0), 13)
                 messages.forEach { item ->
                     val messageId = item.optString("id")
@@ -471,6 +496,11 @@ fun LocalMessengerScreen(
                         ChatText(item.optString("sender", "You"), theme.accent, 11, FontWeight.SemiBold)
                         Spacer(Modifier.height(3.dp))
                         ChatText(item.optString("text"), Color(0xFFE8E9F0), 14)
+                        val deliveryState = item.optString("delivery")
+                        if (deliveryState.isNotBlank()) {
+                            Spacer(Modifier.height(4.dp))
+                            ChatText(deliveryLabel(deliveryState), Color(0xFF9FA6B5), 10)
+                        }
                         Spacer(Modifier.height(7.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             SmallAction("Edit local", {
@@ -512,7 +542,7 @@ fun LocalMessengerScreen(
                 if (editingMessageId != null) ChatText("Editing this device’s copy only", Color(0xFFFFD7A8), 12)
                 Entry(messageInput, { messageInput = it }, "Write a local note/message")
                 Spacer(Modifier.height(8.dp))
-                SmallAction(if (editingMessageId == null) "Save message on this device" else "Save local edit") {
+                SmallAction(if (editingMessageId == null && secureSend != null) "Send encrypted" else if (editingMessageId == null) "Save message on this device" else "Save local edit") {
                     val text = messageInput.trim(); val conversationId = selectedId; val editingId = editingMessageId
                     if (text.isBlank() || conversationId == null) notice = "Write a message first."
                     else if (editingId != null) {
@@ -521,6 +551,15 @@ fun LocalMessengerScreen(
                                 check(store.editLocalMessage(editingId, text)) { "Message no longer exists" }
                                 main.post { messageInput = ""; editingMessageId = null; notice = "Edited this device’s copy only."; refreshChats(conversationId) }
                             } catch (e: Exception) { main.post { notice = "Could not edit local message: ${e.message ?: "storage error"}" } }
+                        }
+                    } else if (secureSend != null) {
+                        executor.execute {
+                            try {
+                                val status = secureSend.invoke(conversationId, text)
+                                main.post { messageInput = ""; notice = status; refreshChats(conversationId) }
+                            } catch (_: Exception) {
+                                main.post { notice = "Encrypted send failed; the message was not sent and remains in the composer." }
+                            }
                         }
                     } else {
                         val now = System.currentTimeMillis(); val id = UUID.randomUUID().toString()
@@ -551,9 +590,21 @@ fun LocalMessengerScreen(
             }
             if (externalNotice.isNotBlank()) ChatText(externalNotice, Color(0xFFFFC6A5), 13)
             if (notice.isNotBlank()) ChatText(notice, Color(0xFFFFC6A5), 13)
-            ChatText("No remote account or service is configured.", Color(0xFF9FA6B5), 12)
+            ChatText(
+                if (secureSend != null && secureReceive != null) "No plaintext send or receive fallback is available."
+                else "No remote account or service is configured.",
+                Color(0xFF9FA6B5), 12
+            )
         }
     }
+}
+
+private fun deliveryLabel(state: String): String = when (state) {
+    "local_only" -> "Only on this device · not delivered"
+    "encrypted_queued_not_delivered" -> "Encrypted · queued on this device · not delivered"
+    "relay_accepted_recipient_not_confirmed" -> "Encrypted · relay accepted · recipient receipt unconfirmed"
+    "received_encrypted_local" -> "Received encrypted · saved on this device"
+    else -> state.replace('_', ' ')
 }
 
 private fun parseThemeColor(value: String): Color? {

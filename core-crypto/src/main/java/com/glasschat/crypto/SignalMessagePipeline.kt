@@ -106,6 +106,7 @@ class SignalMessagePipeline(
         recipientTransportDeviceId: String,
         plaintext: String,
         expiresAt: Long,
+        conversationId: String? = null,
         now: Long = System.currentTimeMillis()
     ): QueuedSignalDelivery {
         require(deliveryId.isNotBlank() && deliveryId.length <= 100)
@@ -150,6 +151,12 @@ class SignalMessagePipeline(
                         ),
                         now
                     )
+                    if (!conversationId.isNullOrBlank()) {
+                        localStore.put("message", deliveryId, JSONObject()
+                            .put("id", deliveryId).put("conversationId", conversationId)
+                            .put("sender", "You").put("text", plaintext).put("createdAt", now)
+                            .put("delivery", QUEUED_DELIVERY), conversationId, now)
+                    }
                     encoded.copyOf()
                 } finally { encoded.fill(0) }
             }
@@ -244,7 +251,25 @@ class SignalMessagePipeline(
         }
     }
 
+    /** Called only after the relay RPC returns the matching delivery ID. */
+    @Synchronized
+    fun markRelayAccepted(deliveryId: String, recipientTransportDeviceId: String, acceptedAt: Long = System.currentTimeMillis()) {
+        localStore.inTransaction {
+            val message = localStore.get("message", deliveryId)
+            if (message != null) {
+                check(message.optString("delivery") == QUEUED_DELIVERY) { "Message is not awaiting relay acceptance" }
+                message.put("delivery", RELAY_ACCEPTED_DELIVERY).put("relayAcceptedAt", acceptedAt)
+                localStore.put("message", deliveryId, message, message.optString("conversationId"), message.optLong("createdAt", acceptedAt))
+            }
+            check(localStore.acknowledgeCiphertext(deliveryId, recipientTransportDeviceId)) {
+                "Relay accepted the message but its local ciphertext copy could not be cleared"
+            }
+        }
+    }
+
     private companion object {
+        const val QUEUED_DELIVERY = "encrypted_queued_not_delivered"
+        const val RELAY_ACCEPTED_DELIVERY = "relay_accepted_recipient_not_confirmed"
         const val RECEIVED_DELIVERY = "received_encrypted_local"
         const val MAX_RELAY_RETENTION_MS = 7L * 24 * 60 * 60 * 1000
     }

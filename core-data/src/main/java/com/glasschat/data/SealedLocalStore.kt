@@ -264,6 +264,22 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    /** Returns all unexpired locally queued ciphertext copies for retry after a network failure. */
+    fun pendingCiphertext(now: Long = System.currentTimeMillis()): List<CiphertextDelivery> {
+        synchronized(lock) {
+            expireCiphertext(now)
+            return list("relay_delivery").asSequence()
+                .filter { it.optLong("expiresAt") > now }
+                .map { row -> CiphertextDelivery(
+                    deliveryId = row.getString("deliveryId"),
+                    senderDeviceId = row.getString("senderDeviceId"),
+                    recipientDeviceId = row.getString("recipientDeviceId"),
+                    ciphertext = Base64.getDecoder().decode(row.getString("ciphertext")),
+                    expiresAt = row.getLong("expiresAt")
+                ) }.toList()
+        }
+    }
+
     /** Returns unexpired ciphertext rows for one device without deleting them on retrieval. */
     fun pendingCiphertextFor(recipientDeviceId: String, now: Long = System.currentTimeMillis()): List<CiphertextDelivery> {
         require(recipientDeviceId.isNotBlank())

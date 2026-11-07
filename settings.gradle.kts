@@ -9,4 +9,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "GlassChat"
-include(":app-owner", ":app-client", ":core-ui", ":core-data", ":core-crypto")
+include(":app-owner", ":app-client", ":core-ui", ":core-data", ":core-crypto", ":core-network")

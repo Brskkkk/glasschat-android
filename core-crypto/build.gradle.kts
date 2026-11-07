@@ -12,4 +12,5 @@ dependencies {
     // Official Signal Android artifact; see docs/CRYPTO_AND_LICENSE.md before distributing.
     implementation("org.signal:libsignal-android:0.106.2")
     implementation(project(":core-data"))
+    implementation(project(":core-network"))
 }
