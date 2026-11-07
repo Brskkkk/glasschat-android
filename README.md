@@ -1,31 +1,26 @@
-# GlassChat Android — foundation preview
+# GlassChat Android — work in progress
 
-This repository is an early, explicitly incomplete Android foundation based on the supplied GlassChat specification. It builds two independently installable APK targets and a shared custom Compose UI module.
+This is the existing private repository for the requested GlassChat Owner and Client apps. It is not a usable messenger or a completed server. The source has not been built or tested in this implementation pass; builds, tests, packaging and CI remain intentionally deferred until the full requested feature implementation is in place, as Jr requested.
 
-## What is implemented in this source
+## Present in source (not build-verified)
 
-- `app-owner` and `app-client` Android application modules with distinct package IDs (`com.glasschat.owner`, `com.glasschat.client`).
-- Shared Compose UI foundation using translucent surfaces, gradient lighting and rounded glass-like panels (not a complete Liquid Glass theme system).
-- Owner-only foreground-service lifecycle preview, notification channel, Start/Pause/Stop notification actions, and a persistent status notification that explicitly says the backend is not configured.
-- Android 13+ notification permission request before starting the service.
-- Manifest special-use foreground-service declaration, scoped to this local demo.
+- Separate `app-owner` and `app-client` modules/package IDs, sharing a Compose screen.
+- A local-only conversation/contact/message UI: create local conversation/contact records, save message text locally, and search the local messages. The UI explicitly says messages are not sent. It now exposes local-copy edit/delete, one local reaction, local bookmarks, and local conversation flags; these actions do not affect another device. Drafts now autosave locally per selected conversation, and pin/archive/mute controls change local flags only; these are not synchronized or backed by remote messaging.
+- `SealedLocalStore`: payload JSON is AES-GCM encrypted with an Android Keystore key before writing to SQLite. Record kind, opaque ID, conversation ID and timestamp columns remain visible; this is local at-rest protection, not SQLCipher/full-database encryption and not E2EE.
+- `queueCiphertext`, `pendingCiphertextFor`, `acknowledgeCiphertext` and `expireCiphertext`: storage operations for per-recipient-device ciphertext copies, idempotent enqueue, no deletion on retrieval, acknowledgement matched to its recipient device, and a seven-day maximum expiry. These are not wired to an API, identity/authentication, a real relay, or a client durable-ack flow.
+- Local-only account-registry primitives in `SealedLocalStore`: random one-time invitation codes with digest-only persistence and expiry/revocation, transactional local UUID account creation, account status changes, per-device public-key/FCM-token records and local device revocation. These are storage helpers only: there is no complete registration UI or remotely authenticated server, and no remote permission is enforced.
+- Owner foreground-service lifecycle/notification shell with Start/Pause/Resume/Stop actions. It reports the account service and relay unavailable. It does not listen for network requests or host a server.
 
-## Not implemented; do not treat as ready for messaging or server use
+## Still required by the supplied specification
 
-There is no account/authentication service, invitation system, user/device registry, API server, relay, gateway/VPS, database, local encrypted persistence, cryptographic protocol, E2EE, key management, contact flow, conversation UI, attachment transfer, FCM, true service health monitoring, restart/boot recovery, audit log, Owner administration, privacy settings, theme editor, production signing, or release build. The Owner service shell does not listen for requests or host GlassChat. No message is sent or encrypted. It intentionally reports this limitation in the UI and notification.
+The real Owner/Client identity and authentication system, registration/invitations, account/device/key registries, secure contact requests, a maintained Signal-compatible E2EE session implementation, authenticated network APIs, functioning Owner server, public reachability, ciphertext-only network relay and durable recipient acknowledgements, encrypted attachments, FCM, groups and normal messaging features, Owner administration, true health/recovery behavior, complete Liquid Glass theme system, migrations, and usable release builds are not implemented. No feature should be considered complete based only on the current source.
 
-The foreground-service implementation is a lifecycle demonstration, not evidence that an ordinary phone can host the always-available service in the specification. Android and Play distribution restrictions for `specialUse` services require device/API and policy review before a real deployment. Auto-start, `START_STICKY`, and force-stop recovery are not implemented.
+The complete feature checklist and deployment limitations are in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
 
-## Build
+## Build and release
 
-Requires JDK 17, Android SDK platform 35 and Android Gradle Plugin dependencies.
-
-```sh
-./gradlew :app-owner:assembleDebug :app-client:assembleDebug
-```
-
-Debug APKs are for development only and are not production signed. Build verification has not passed in this environment: required AndroidX artifacts were absent from the offline cache, and the online Gradle process was terminated before compilation completed.
+No APK is available. A previous local Gradle attempt failed during `:app-owner:mergeDebugGlobalSynthetics` because required AndroidX/Guava artifacts were unavailable offline; an earlier online Gradle attempt ended before compilation. Per Jr's instruction, do not build, test, package APKs, or trigger CI until the requested feature implementation is complete and stable.
 
 ## Security
 
-This repository contains no backend secrets or signing keys. Keep private keys, tokens, service credentials, production signing material and `.env` files out of Git. `.gitignore` excludes common local secret and keystore files; review every source change before publishing.
+No service credentials, backend tokens, production signing keys or other secrets belong in this repository. No production signing configuration or backend credentials have been supplied. The currently implemented local store and queue do not make the app ready for real private communication.
