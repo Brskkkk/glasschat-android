@@ -241,10 +241,14 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
     @Synchronized
     fun send(conversationId: String, text: String): String {
         val own = requireAccount(); val local = requireLocalDevice(own.getString("id"))
-        val peer = verifiedPeers().values.firstOrNull { it.conversationId == conversationId }
-            ?: error("No verified peer session is linked to this conversation")
+        val peers = verifiedPeers().filterValues { it.conversationId == conversationId }
+        check(peers.isNotEmpty()) { "No verified peer session is linked to this conversation" }
+        check(peers.size == 1) {
+            "This conversation has multiple verified peer devices. Multi-device delivery is not supported yet, so no message was sent."
+        }
+        val (transportDeviceId, peer) = peers.entries.single()
         val messaging = messaging(own.getString("id"), local)
-        val result = messaging.sendText(peer, peerDeviceForConversation(conversationId), conversationId, text)
+        val result = messaging.sendText(peer, transportDeviceId, conversationId, text)
         return when (result.state) {
             SendState.ENCRYPTED_QUEUED_NOT_DELIVERED -> "Encrypted and queued locally; relay delivery is not confirmed."
             SendState.RELAY_ACCEPTED_RECIPIENT_NOT_CONFIRMED -> "Encrypted ciphertext accepted by relay; recipient receipt is not confirmed."
@@ -308,10 +312,6 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
         .filter { it.optBoolean("verifiedPeer") }
         .associate { row -> row.getString("transportId") to VerifiedPeerTransportDevice(
             row.getString("accountId"), row.getInt("signalDeviceId"), row.getString("conversationId")) }
-
-    private fun peerDeviceForConversation(conversationId: String): String = verifiedPeers().entries
-        .firstOrNull { it.value.conversationId == conversationId }?.key
-        ?: error("No verified peer device is linked to this conversation")
 
     private fun requireLocalDevice(accountId: String): JSONObject {
         val device = store.get("device", deviceRecordId(accountId)) ?: error("Register this device first")
