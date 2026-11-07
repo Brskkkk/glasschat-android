@@ -63,9 +63,16 @@ fun LocalMessengerScreen(
     val searchHits = remember { mutableStateListOf<JSONObject>() }
     var notice by remember { mutableStateOf("") }
     var themeId by remember { mutableStateOf("liquid") }
+    var customAccentHex by remember { mutableStateOf("") }
+    var accentInput by remember { mutableStateOf("") }
+    var profileName by remember { mutableStateOf("") }
+    var profileHandle by remember { mutableStateOf("") }
+    var profileAbout by remember { mutableStateOf("") }
     var newInviteCode by remember { mutableStateOf("") }
     var revokeInviteInput by remember { mutableStateOf("") }
-    val theme = glassTheme(themeId)
+    val baseTheme = glassTheme(themeId)
+    val customAccent = parseThemeColor(customAccentHex)
+    val theme = if (customAccent == null) baseTheme else baseTheme.copy(accent = customAccent, swatch = customAccent)
 
     fun refreshContacts() {
         executor.execute {
@@ -140,7 +147,17 @@ fun LocalMessengerScreen(
         refreshOwnerAudit()
         executor.execute {
             val savedTheme = try { store.get("setting", "theme")?.optString("id") } catch (_: Exception) { null }
-            if (!savedTheme.isNullOrBlank()) main.post { themeId = savedTheme }
+            val savedAccent = try { store.get("setting", "custom_accent")?.optString("hex") } catch (_: Exception) { null }
+            val savedProfile = try { store.get("setting", "local_profile") } catch (_: Exception) { null }
+            main.post {
+                if (!savedTheme.isNullOrBlank()) themeId = savedTheme
+                if (!savedAccent.isNullOrBlank()) { customAccentHex = savedAccent; accentInput = savedAccent }
+                if (savedProfile != null) {
+                    profileName = savedProfile.optString("displayName")
+                    profileHandle = savedProfile.optString("handle")
+                    profileAbout = savedProfile.optString("about")
+                }
+            }
         }
     }
     LaunchedEffect(selectedId, messageInput, editingMessageId) {
@@ -179,13 +196,65 @@ fun LocalMessengerScreen(
                                 .border(if (preset.id == themeId) 2.dp else 1.dp, if (preset.id == themeId) Color.White else Color(0x55FFFFFF), RoundedCornerShape(14.dp))
                                 .clickable {
                                     themeId = preset.id
+                                    customAccentHex = ""
+                                    accentInput = ""
                                     executor.execute {
-                                        try { store.put("setting", "theme", JSONObject().put("id", preset.id)) }
-                                        catch (e: Exception) { main.post { notice = "Could not save theme: ${e.message ?: "storage error"}" } }
+                                        try {
+                                            store.put("setting", "theme", JSONObject().put("id", preset.id))
+                                            store.put("setting", "custom_accent", JSONObject().put("hex", ""))
+                                        } catch (e: Exception) { main.post { notice = "Could not save theme: ${e.message ?: "storage error"}" } }
                                     }
                                 }
                                 .padding(horizontal = 12.dp, vertical = 10.dp)
                         ) { ChatText(preset.label, Color.White, 12, FontWeight.Medium) }
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                ChatText("CUSTOM ACCENT", Color.White, 12, FontWeight.SemiBold)
+                Spacer(Modifier.height(5.dp))
+                ChatText("Enter a hex color such as #87D8CB. This changes only the local presentation.", Color(0xFFBFC4D0), 11)
+                Spacer(Modifier.height(7.dp))
+                Entry(accentInput, { accentInput = it }, "#RRGGBB")
+                Spacer(Modifier.height(7.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
+                    SmallAction("Apply accent") {
+                        val parsed = parseThemeColor(accentInput)
+                        if (parsed == null) notice = "Use a valid six-digit hex color, for example #87D8CB."
+                        else {
+                            val normalizedAccent = accentInput.trim().uppercase()
+                            customAccentHex = normalizedAccent
+                            executor.execute {
+                                try { store.put("setting", "custom_accent", JSONObject().put("hex", normalizedAccent)) }
+                                catch (e: Exception) { main.post { notice = "Could not save accent: ${e.message ?: "storage error"}" } }
+                            }
+                            notice = "Custom accent saved on this device."
+                        }
+                    }
+                    if (customAccent != null) Box(Modifier.size(26.dp).background(customAccent, RoundedCornerShape(8.dp)).border(1.dp, Color.White, RoundedCornerShape(8.dp)))
+                }
+            }
+            Panel {
+                ChatText("LOCAL PROFILE PREVIEW", Color.White, 16, FontWeight.SemiBold)
+                Spacer(Modifier.height(5.dp))
+                ChatText("Edit how your profile could look. It is stored on this device only and is not published or tied to an authenticated account.", Color(0xFFBFC4D0), 12)
+                Spacer(Modifier.height(8.dp))
+                Entry(profileName, { profileName = it.take(64) }, "Display name")
+                Spacer(Modifier.height(7.dp))
+                Entry(profileHandle, { profileHandle = it.filter { ch -> ch.isLetterOrDigit() || ch == '_' }.take(32) }, "Username")
+                Spacer(Modifier.height(7.dp))
+                Entry(profileAbout, { profileAbout = it.take(160) }, "About")
+                Spacer(Modifier.height(8.dp))
+                Panel {
+                    ChatText(profileName.ifBlank { "Your name" }, Color.White, 16, FontWeight.SemiBold)
+                    ChatText(if (profileHandle.isBlank()) "@username" else "@$profileHandle", theme.accent, 12)
+                    if (profileAbout.isNotBlank()) ChatText(profileAbout, Color(0xFFBFC4D0), 12)
+                }
+                Spacer(Modifier.height(8.dp))
+                SmallAction("Save local profile preview") {
+                    val value = JSONObject().put("displayName", profileName.trim()).put("handle", profileHandle.trim()).put("about", profileAbout.trim())
+                    executor.execute {
+                        try { store.put("setting", "local_profile", value); main.post { notice = "Profile preview saved on this device only." } }
+                        catch (e: Exception) { main.post { notice = "Could not save profile preview: ${e.message ?: "storage error"}" } }
                     }
                 }
             }
@@ -476,6 +545,12 @@ fun LocalMessengerScreen(
             ChatText("No remote account or service is configured.", Color(0xFF9FA6B5), 12)
         }
     }
+}
+
+private fun parseThemeColor(value: String): Color? {
+    val normalized = value.trim()
+    if (!normalized.matches(Regex("#[0-9a-fA-F]{6}"))) return null
+    return try { Color(android.graphics.Color.parseColor(normalized)) } catch (_: IllegalArgumentException) { null }
 }
 
 private fun refreshMessages(
