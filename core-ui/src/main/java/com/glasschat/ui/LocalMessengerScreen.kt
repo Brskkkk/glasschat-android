@@ -47,6 +47,8 @@ fun LocalMessengerScreen(
     val executor = remember { Executors.newSingleThreadExecutor() }
     val main = remember { Handler(Looper.getMainLooper()) }
     val conversations = remember { mutableStateListOf<JSONObject>() }
+    val contacts = remember { mutableStateListOf<JSONObject>() }
+    val nicknameInputs = remember { mutableStateMapOf<String, String>() }
     val messages = remember { mutableStateListOf<JSONObject>() }
     var selectedId by remember { mutableStateOf<String?>(null) }
     var selectedName by remember { mutableStateOf("") }
@@ -57,6 +59,24 @@ fun LocalMessengerScreen(
     var searchInput by remember { mutableStateOf("") }
     val searchHits = remember { mutableStateListOf<JSONObject>() }
     var notice by remember { mutableStateOf("") }
+
+    fun refreshContacts() {
+        executor.execute {
+            try {
+                val rows = store.list("contact")
+                main.post {
+                    contacts.clear()
+                    contacts.addAll(rows)
+                    rows.forEach { contact ->
+                        val id = contact.optString("id")
+                        if (id.isNotBlank() && id !in nicknameInputs) nicknameInputs[id] = contact.optString("nickname")
+                    }
+                }
+            } catch (e: Exception) {
+                main.post { notice = "Could not open local contacts: ${e.message ?: "storage error"}" }
+            }
+        }
+    }
 
     fun refreshChats(selectId: String? = selectedId) {
         executor.execute {
@@ -81,7 +101,7 @@ fun LocalMessengerScreen(
         }
     }
 
-    LaunchedEffect(Unit) { refreshChats(null) }
+    LaunchedEffect(Unit) { refreshChats(null); refreshContacts() }
     LaunchedEffect(selectedId, messageInput, editingMessageId) {
         val conversationId = selectedId
         if (conversationId != null && editingMessageId == null) {
@@ -135,9 +155,52 @@ fun LocalMessengerScreen(
                         executor.execute {
                             try {
                                 store.put("conversation", id, conversation, id, now)
-                                if (contactInput.isNotBlank()) store.put("contact", UUID.randomUUID().toString(), JSONObject().put("label", label).put("glasschatId", contactInput.trim()).put("createdAt", now), null, now)
-                                main.post { titleInput = ""; contactInput = ""; notice = "Saved on this device only."; refreshChats(id) }
+                                if (contactInput.isNotBlank()) {
+                                    val contactId = UUID.randomUUID().toString()
+                                    store.put("contact", contactId, JSONObject().put("id", contactId).put("label", label).put("glasschatId", contactInput.trim()).put("createdAt", now), null, now)
+                                }
+                                main.post { titleInput = ""; contactInput = ""; notice = "Saved on this device only."; refreshChats(id); refreshContacts() }
                             } catch (e: Exception) { main.post { notice = "Could not save locally: ${e.message ?: "storage error"}" } }
+                        }
+                    }
+                }
+            }
+            Panel {
+                ChatText("CONTACTS · PRIVATE ON THIS DEVICE", Color.White, 16, FontWeight.SemiBold)
+                Spacer(Modifier.height(5.dp))
+                ChatText("Nicknames stay on your device; the contact and Owner cannot see them.", Color(0xFFBFC4D0), 12)
+                if (contacts.isEmpty()) {
+                    Spacer(Modifier.height(7.dp)); ChatText("No saved local contacts yet.", Color(0xFFBFC4D0), 13)
+                }
+                contacts.forEach { contact ->
+                    val contactId = contact.optString("id")
+                    val nickname = nicknameInputs[contactId] ?: contact.optString("nickname")
+                    Spacer(Modifier.height(8.dp))
+                    Panel {
+                        ChatText(contact.optString("label", "Contact"), Color.White, 14, FontWeight.SemiBold)
+                        Spacer(Modifier.height(3.dp))
+                        ChatText(contact.optString("glasschatId"), Color(0xFFBFC4D0), 11)
+                        Spacer(Modifier.height(6.dp))
+                        Entry(nickname, { nicknameInputs[contactId] = it }, "Private nickname")
+                        Spacer(Modifier.height(6.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            SmallAction("Save nickname", {
+                                val value = nicknameInputs[contactId].orEmpty()
+                                executor.execute {
+                                    try {
+                                        check(store.setLocalContactNickname(contactId, value)) { "Contact no longer exists" }
+                                        main.post { notice = if (value.isBlank()) "Private nickname removed." else "Private nickname saved on this device."; refreshContacts() }
+                                    } catch (e: Exception) { main.post { notice = "Could not save nickname: ${e.message ?: "storage error"}" } }
+                                }
+                            }, true)
+                            SmallAction("Remove contact", {
+                                executor.execute {
+                                    try {
+                                        store.removeLocalContact(contactId)
+                                        main.post { nicknameInputs.remove(contactId); notice = "Contact removed from this device only."; refreshContacts() }
+                                    } catch (e: Exception) { main.post { notice = "Could not remove contact: ${e.message ?: "storage error"}" } }
+                                }
+                            }, true)
                         }
                     }
                 }

@@ -7,6 +7,8 @@ import android.database.sqlite.SQLiteOpenHelper
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.util.Base64
@@ -43,8 +45,13 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // Never destructively migrate encrypted user data. Add explicit, transactional migrations
-        // here before increasing DATABASE_VERSION.
+        if (oldVersion == 1 && newVersion == 2) {
+            // Version 2 binds AES-GCM ciphertext to its row identity and metadata. SQLiteOpenHelper
+            // runs this upgrade transactionally; if any row cannot be opened, the whole migration
+            // rolls back and the original database remains intact.
+            migrateV1ToV2(db)
+            return
+        }
         throw IllegalStateException("No safe migration from local store version $oldVersion to $newVersion")
     }
 
@@ -52,7 +59,7 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
         require(kind in ALLOWED_KINDS) { "Unknown record kind" }
         require(id.isNotBlank() && id.length <= 200) { "Invalid record id" }
         require(conversationId == null || conversationId.length <= 200) { "Invalid conversation id" }
-        val encrypted = encrypt(json.toString().toByteArray(StandardCharsets.UTF_8))
+        val encrypted = encrypt(kind, id, conversationId, createdAt, json.toString().toByteArray(StandardCharsets.UTF_8))
         synchronized(lock) {
             writableDatabase.beginTransaction()
             try {
@@ -60,7 +67,9 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
                     put("kind", kind); put("id", id); put("conversation_id", conversationId)
                     put("created_at", createdAt); put("payload", encrypted)
                 }
-                writableDatabase.insertWithOnConflict("records", null, values, SQLiteDatabase.CONFLICT_REPLACE)
+                check(writableDatabase.insertWithOnConflict("records", null, values, SQLiteDatabase.CONFLICT_REPLACE) != -1L) {
+                    "Could not save encrypted record"
+                }
                 writableDatabase.setTransactionSuccessful()
             } finally { writableDatabase.endTransaction() }
         }
@@ -69,9 +78,12 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
     fun get(kind: String, id: String): JSONObject? {
         require(kind in ALLOWED_KINDS)
         synchronized(lock) {
-            readableDatabase.rawQuery("SELECT payload FROM records WHERE kind=? AND id=?", arrayOf(kind, id)).use { cursor ->
+            readableDatabase.rawQuery("SELECT conversation_id,created_at,payload FROM records WHERE kind=? AND id=?", arrayOf(kind, id)).use { cursor ->
                 if (!cursor.moveToFirst()) return null
-                return JSONObject(String(decrypt(cursor.getBlob(0)), StandardCharsets.UTF_8))
+                val conversationId = if (cursor.isNull(0)) null else cursor.getString(0)
+                val createdAt = cursor.getLong(1)
+                val payload = decrypt(kind, id, conversationId, createdAt, cursor.getBlob(2))
+                return JSONObject(String(payload, StandardCharsets.UTF_8))
             }
         }
     }
@@ -79,11 +91,17 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
     fun list(kind: String, conversationId: String? = null): List<JSONObject> {
         require(kind in ALLOWED_KINDS)
         synchronized(lock) {
-            val sql = if (conversationId == null) "SELECT payload FROM records WHERE kind=? ORDER BY created_at,id" else "SELECT payload FROM records WHERE kind=? AND conversation_id=? ORDER BY created_at,id"
+            val sql = if (conversationId == null) "SELECT id,conversation_id,created_at,payload FROM records WHERE kind=? ORDER BY created_at,id" else "SELECT id,conversation_id,created_at,payload FROM records WHERE kind=? AND conversation_id=? ORDER BY created_at,id"
             val args = if (conversationId == null) arrayOf(kind) else arrayOf(kind, conversationId)
             readableDatabase.rawQuery(sql, args).use { cursor ->
                 val result = ArrayList<JSONObject>(cursor.count)
-                while (cursor.moveToNext()) result += JSONObject(String(decrypt(cursor.getBlob(0)), StandardCharsets.UTF_8))
+                while (cursor.moveToNext()) {
+                    val id = cursor.getString(0)
+                    val rowConversationId = if (cursor.isNull(1)) null else cursor.getString(1)
+                    val createdAt = cursor.getLong(2)
+                    val payload = decrypt(kind, id, rowConversationId, createdAt, cursor.getBlob(3))
+                    result += JSONObject(String(payload, StandardCharsets.UTF_8))
+                }
                 return result
             }
         }
@@ -94,10 +112,14 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
         require(limit in 1..500)
         val needle = query.trim().lowercase()
         synchronized(lock) {
-            readableDatabase.rawQuery("SELECT payload FROM records WHERE kind='message' ORDER BY created_at DESC LIMIT ?", arrayOf(limit.toString())).use { cursor ->
+            readableDatabase.rawQuery("SELECT id,conversation_id,created_at,payload FROM records WHERE kind='message' ORDER BY created_at DESC LIMIT ?", arrayOf(limit.toString())).use { cursor ->
                 val hits = ArrayList<JSONObject>()
                 while (cursor.moveToNext()) {
-                    val item = JSONObject(String(decrypt(cursor.getBlob(0)), StandardCharsets.UTF_8))
+                    val id = cursor.getString(0)
+                    val conversationId = if (cursor.isNull(1)) null else cursor.getString(1)
+                    val createdAt = cursor.getLong(2)
+                    val payload = decrypt("message", id, conversationId, createdAt, cursor.getBlob(3))
+                    val item = JSONObject(String(payload, StandardCharsets.UTF_8))
                     if (item.optString("text").lowercase().contains(needle)) hits += item
                 }
                 return hits
@@ -121,7 +143,7 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
                     put("id", messageId)
                     put("conversation_id", current.optString("conversationId").ifBlank { null })
                     put("created_at", current.optLong("createdAt", editedAt))
-                    put("payload", encrypt(current.toString().toByteArray(StandardCharsets.UTF_8)))
+                    put("payload", encrypt("message", messageId, current.optString("conversationId").ifBlank { null }, current.optLong("createdAt", editedAt), current.toString().toByteArray(StandardCharsets.UTF_8)))
                 }
                 check(writableDatabase.insertWithOnConflict("records", null, values, SQLiteDatabase.CONFLICT_REPLACE) != -1L) {
                     "Could not update local message"
@@ -161,6 +183,24 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
             put("conversation", conversationId, conversation, conversationId, conversation.optLong("createdAt", now))
         }
     }
+
+    /**
+     * A contact nickname is a private label on this device. It is never uploaded or visible to
+     * the labeled account or Owner. Passing a blank value removes the nickname.
+     */
+    fun setLocalContactNickname(contactId: String, nickname: String, now: Long = System.currentTimeMillis()): Boolean {
+        require(contactId.isNotBlank() && nickname.length <= 80)
+        synchronized(lock) {
+            val contact = get("contact", contactId) ?: return false
+            if (nickname.isBlank()) contact.remove("nickname") else contact.put("nickname", nickname.trim())
+            contact.put("updatedAt", now)
+            put("contact", contactId, contact, createdAt = contact.optLong("createdAt", now))
+            return true
+        }
+    }
+
+    /** Remove only this device's saved contact entry. */
+    fun removeLocalContact(contactId: String): Boolean = delete("contact", contactId)
 
     /** A bookmark is private to this device. */
     fun setLocalBookmark(messageId: String, saved: Boolean, now: Long = System.currentTimeMillis()): Boolean {
@@ -446,9 +486,13 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
     }
 
     private fun accountUsernameExists(db: SQLiteDatabase, username: String): Boolean {
-        db.rawQuery("SELECT payload FROM records WHERE kind='account'", null).use { cursor ->
+        db.rawQuery("SELECT id,conversation_id,created_at,payload FROM records WHERE kind='account'", null).use { cursor ->
             while (cursor.moveToNext()) {
-                val account = JSONObject(String(decrypt(cursor.getBlob(0)), StandardCharsets.UTF_8))
+                val id = cursor.getString(0)
+                val conversationId = if (cursor.isNull(1)) null else cursor.getString(1)
+                val createdAt = cursor.getLong(2)
+                val payload = decrypt("account", id, conversationId, createdAt, cursor.getBlob(3))
+                val account = JSONObject(String(payload, StandardCharsets.UTF_8))
                 if (account.optString("username").equals(username, ignoreCase = true)) return true
             }
         }
@@ -456,16 +500,19 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
     }
 
     private fun readRecord(db: SQLiteDatabase, kind: String, id: String): JSONObject? {
-        db.rawQuery("SELECT payload FROM records WHERE kind=? AND id=?", arrayOf(kind, id)).use { cursor ->
+        db.rawQuery("SELECT conversation_id,created_at,payload FROM records WHERE kind=? AND id=?", arrayOf(kind, id)).use { cursor ->
             if (!cursor.moveToFirst()) return null
-            return JSONObject(String(decrypt(cursor.getBlob(0)), StandardCharsets.UTF_8))
+            val conversationId = if (cursor.isNull(0)) null else cursor.getString(0)
+            val createdAt = cursor.getLong(1)
+            val payload = decrypt(kind, id, conversationId, createdAt, cursor.getBlob(2))
+            return JSONObject(String(payload, StandardCharsets.UTF_8))
         }
     }
 
     private fun insertEncryptedRecord(db: SQLiteDatabase, kind: String, id: String, conversationId: String?, createdAt: Long, json: JSONObject) {
         val values = ContentValues().apply {
             put("kind", kind); put("id", id); put("conversation_id", conversationId)
-            put("created_at", createdAt); put("payload", encrypt(json.toString().toByteArray(StandardCharsets.UTF_8)))
+            put("created_at", createdAt); put("payload", encrypt(kind, id, conversationId, createdAt, json.toString().toByteArray(StandardCharsets.UTF_8)))
         }
         check(db.insertOrThrow("records", null, values) >= 0L)
     }
@@ -473,7 +520,7 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
     private fun updateEncryptedRecord(db: SQLiteDatabase, kind: String, id: String, conversationId: String?, createdAt: Long, json: JSONObject) {
         val values = ContentValues().apply {
             put("conversation_id", conversationId); put("created_at", createdAt)
-            put("payload", encrypt(json.toString().toByteArray(StandardCharsets.UTF_8)))
+            put("payload", encrypt(kind, id, conversationId, createdAt, json.toString().toByteArray(StandardCharsets.UTF_8)))
         }
         check(db.update("records", values, "kind=? AND id=?", arrayOf(kind, id)) == 1) { "Record disappeared during transaction" }
     }
@@ -498,15 +545,47 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
         }
     }
 
-    private fun encrypt(plain: ByteArray): ByteArray {
+    private data class RowIdentity(val kind: String, val id: String, val conversationId: String?, val createdAt: Long)
+
+    private fun migrateV1ToV2(db: SQLiteDatabase) {
+        val rows = ArrayList<RowIdentity>()
+        db.rawQuery("SELECT kind,id,conversation_id,created_at FROM records", null).use { cursor ->
+            while (cursor.moveToNext()) rows += RowIdentity(
+                cursor.getString(0), cursor.getString(1),
+                if (cursor.isNull(2)) null else cursor.getString(2), cursor.getLong(3)
+            )
+        }
+        rows.forEach { row ->
+            val oldPayload = db.rawQuery("SELECT payload FROM records WHERE kind=? AND id=?", arrayOf(row.kind, row.id)).use { cursor ->
+                check(cursor.moveToFirst()) { "Record disappeared during encrypted-store migration" }
+                cursor.getBlob(0)
+            }
+            val plaintext = decryptLegacyV1(oldPayload)
+            val upgraded = try { encrypt(row.kind, row.id, row.conversationId, row.createdAt, plaintext) }
+                finally { plaintext.fill(0) }
+            val values = ContentValues().apply { put("payload", upgraded) }
+            check(db.update("records", values, "kind=? AND id=?", arrayOf(row.kind, row.id)) == 1) {
+                "Record could not be migrated; original database is preserved by transaction rollback"
+            }
+        }
+    }
+
+    private fun encrypt(kind: String, id: String, conversationId: String?, createdAt: Long, plain: ByteArray): ByteArray {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, key)
+        cipher.updateAAD(recordAad(kind, id, conversationId, createdAt))
         val iv = cipher.iv
         val encrypted = cipher.doFinal(plain)
         return ByteBuffer.allocate(1 + iv.size + encrypted.size).put(iv.size.toByte()).put(iv).put(encrypted).array()
     }
 
-    private fun decrypt(record: ByteArray): ByteArray {
+    private fun decrypt(kind: String, id: String, conversationId: String?, createdAt: Long, record: ByteArray): ByteArray = decryptRecord(record) { cipher ->
+        cipher.updateAAD(recordAad(kind, id, conversationId, createdAt))
+    }
+
+    private fun decryptLegacyV1(record: ByteArray): ByteArray = decryptRecord(record) { }
+
+    private inline fun decryptRecord(record: ByteArray, configure: (Cipher) -> Unit): ByteArray {
         try {
             val input = ByteBuffer.wrap(record)
             val ivSize = input.get().toInt() and 0xff
@@ -515,10 +594,23 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
             val encrypted = ByteArray(input.remaining()).also(input::get)
             val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
+            configure(cipher)
             return cipher.doFinal(encrypted)
         } catch (e: Exception) {
             throw IllegalStateException("Local encrypted data could not be opened; no data was cleared.", e)
         }
+    }
+
+    private fun recordAad(kind: String, id: String, conversationId: String?, createdAt: Long): ByteArray {
+        val bytes = ByteArrayOutputStream()
+        DataOutputStream(bytes).use { out ->
+            out.writeUTF(kind)
+            out.writeUTF(id)
+            out.writeBoolean(conversationId != null)
+            if (conversationId != null) out.writeUTF(conversationId)
+            out.writeLong(createdAt)
+        }
+        return bytes.toByteArray()
     }
 
     private fun getOrCreateKey(): SecretKey {
@@ -538,7 +630,7 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
 
     companion object {
         private const val DATABASE_NAME = "glasschat_local.db"
-        private const val DATABASE_VERSION = 1
+        private const val DATABASE_VERSION = 2
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val KEY_ALIAS = "glasschat_local_records_v1"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
