@@ -58,6 +58,8 @@ fun LocalMessengerScreen(
     val conversations = remember { mutableStateListOf<JSONObject>() }
     val contacts = remember { mutableStateListOf<JSONObject>() }
     val ownerAccounts = remember { mutableStateListOf<JSONObject>() }
+    val serverAccounts = remember { mutableStateListOf<JSONObject>() }
+    val serverAudit = remember { mutableStateListOf<JSONObject>() }
     val ownerAudit = remember { mutableStateListOf<JSONObject>() }
     val nicknameInputs = remember { mutableStateMapOf<String, String>() }
     val messages = remember { mutableStateListOf<JSONObject>() }
@@ -152,6 +154,23 @@ fun LocalMessengerScreen(
             }
         }
         refreshOwnerAudit()
+    }
+
+    fun refreshServerAccounts() {
+        if (!owner) return
+        executor.execute {
+            try {
+                val rows = secureRuntime.ownerListAccounts()
+                val auditRows = secureRuntime.ownerListAdminAudit(100)
+                main.post {
+                    serverAccounts.clear(); serverAccounts.addAll(rows)
+                    serverAudit.clear(); serverAudit.addAll(auditRows)
+                    notice = "Server accounts, device states, and admin audit refreshed."
+                }
+            } catch (e: Exception) {
+                main.post { notice = "Could not refresh server accounts; confirm this is an authenticated Owner and migration 0007 is deployed. ${e.message ?: "request failed"}" }
+            }
+        }
     }
 
     fun refreshChats(selectId: String? = selectedId) {
@@ -413,6 +432,63 @@ fun LocalMessengerScreen(
                             executor.execute { try { val result = secureRuntime.retryQueued(); main.post { notice = result; selectedId?.let { refreshMessages(store, executor, main, it, messages) { msg -> notice = msg } } } } catch (_: Exception) { main.post { notice = "Encrypted queue retry is unavailable; no plaintext was sent." } } }
                         }
                     }
+                }
+            }
+            if (owner) Panel {
+                ChatText("SERVER ACCOUNT & DEVICE ADMINISTRATION", Color.White, 16, FontWeight.SemiBold)
+                Spacer(Modifier.height(5.dp))
+                ChatText("Server-authoritative controls require an active Owner login and migration 0007. Suspending a client or revoking a device immediately blocks its server relay access; device revocation also removes published prekeys. Owner accounts cannot be suspended here.", Color(0xFFBFC4D0), 12)
+                Spacer(Modifier.height(8.dp))
+                SmallAction("Refresh server accounts + audit", { refreshServerAccounts() })
+                serverAccounts.forEach { account ->
+                    val accountId = account.optString("account_id")
+                    val status = account.optString("status", "unknown")
+                    Spacer(Modifier.height(9.dp))
+                    ChatText("${account.optString("display_name", account.optString("username"))} · @${account.optString("username")}", Color.White, 13, FontWeight.SemiBold)
+                    ChatText("${account.optString("role")} · $status", Color(0xFFBFC4D0), 11)
+                    if (account.optString("role") == "client" && status in setOf("active", "suspended")) {
+                        SmallAction(if (status == "active") "Suspend client" else "Restore client", {
+                            val nextStatus = if (status == "active") "suspended" else "active"
+                            executor.execute {
+                                try {
+                                    val changed = secureRuntime.ownerSetClientStatus(accountId, nextStatus)
+                                    main.post { notice = if (changed) "Server client account $nextStatus." else "Server account was already in that state or no longer available."; refreshServerAccounts() }
+                                } catch (e: Exception) { main.post { notice = "Server account change failed: ${e.message ?: "Owner authorization required"}" } }
+                            }
+                        }, true)
+                    }
+                    val devices = account.optJSONArray("devices")
+                    for (deviceIndex in 0 until (devices?.length() ?: 0)) {
+                        val device = devices?.optJSONObject(deviceIndex) ?: continue
+                        val deviceId = device.optString("device_id")
+                        val deviceStatus = device.optString("status", "unknown")
+                        Spacer(Modifier.height(5.dp))
+                        ChatText("Device ${device.optInt("signal_device_id")} · $deviceStatus · $deviceId", Color(0xFFE8E9F0), 10)
+                        if (deviceStatus == "active") SmallAction("Revoke device", {
+                            executor.execute {
+                                try {
+                                    val changed = secureRuntime.ownerRevokeDevice(deviceId)
+                                    main.post { notice = if (changed) "Server device revoked; its published prekeys were removed." else "Device was already revoked or is no longer available."; refreshServerAccounts() }
+                                } catch (e: Exception) { main.post { notice = "Device revocation failed: ${e.message ?: "Owner authorization required"}" } }
+                            }
+                        }, true)
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                ChatText("SERVER ADMIN AUDIT", Color.White, 13, FontWeight.SemiBold)
+                ChatText("Recent account and device changes recorded by Supabase; no message content.", Color(0xFFBFC4D0), 11)
+                if (serverAudit.isEmpty()) {
+                    Spacer(Modifier.height(5.dp)); ChatText("No server admin events returned.", Color(0xFFBFC4D0), 11)
+                }
+                serverAudit.take(20).forEach { event ->
+                    val eventName = event.optString("event_type").replace('_', ' ')
+                    val whenText = event.optString("created_at")
+                    Spacer(Modifier.height(6.dp))
+                    ChatText("$eventName · $whenText", Color.White, 11, FontWeight.Medium)
+                    val accountId = event.optString("target_account_id")
+                    val deviceId = event.optString("target_device_id")
+                    if (accountId.isNotBlank() && accountId != "null") ChatText("Account: $accountId", Color(0xFFBFC4D0), 10)
+                    if (deviceId.isNotBlank() && deviceId != "null") ChatText("Device: $deviceId", Color(0xFFBFC4D0), 10)
                 }
             }
             Panel {

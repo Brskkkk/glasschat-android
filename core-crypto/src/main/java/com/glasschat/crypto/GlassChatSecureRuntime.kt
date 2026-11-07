@@ -79,6 +79,39 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
         return relay().createInvitation(accessToken(), expiry)
     }
 
+    /** Returns server-authoritative Owner-managed account rows with non-secret device metadata. */
+    @Synchronized
+    fun ownerListAccounts(): List<JSONObject> {
+        requireOwnerAccount()
+        val client = relay(); val token = accessToken(); val rows = client.ownerListAccounts(token)
+        return (0 until rows.length()).mapNotNull { index ->
+            rows.optJSONObject(index)?.let { account ->
+                val result = JSONObject(account.toString())
+                val deviceRows = client.ownerListDevices(token, account.getString("account_id"))
+                result.put("devices", deviceRows)
+            }
+        }
+    }
+
+    @Synchronized
+    fun ownerListAdminAudit(limit: Int = 100): List<JSONObject> {
+        requireOwnerAccount()
+        val rows = relay().ownerListAdminAudit(accessToken(), limit)
+        return (0 until rows.length()).mapNotNull { rows.optJSONObject(it)?.let { row -> JSONObject(row.toString()) } }
+    }
+
+    @Synchronized
+    fun ownerSetClientStatus(accountId: String, status: String): Boolean {
+        requireOwnerAccount()
+        return relay().ownerSetClientStatus(accessToken(), accountId, status)
+    }
+
+    @Synchronized
+    fun ownerRevokeDevice(deviceId: String): Boolean {
+        requireOwnerAccount()
+        return relay().revokeDevice(accessToken(), deviceId)
+    }
+
     @Synchronized
     fun initializeDevice(): String {
         val account = requireAccount()
@@ -413,6 +446,12 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
         check(device.optBoolean("registered")) { "This device's Signal keys are not fully published" }
         SealedSignalProtocolStore(store, accountId).requireProvisionedIdentity(accountId, device.getInt("signalDeviceId"))
         return device
+    }
+
+    private fun requireOwnerAccount(): JSONObject {
+        val account = requireAccount()
+        check(account.optString("role") == "owner") { "Only an authenticated active Owner can manage server accounts or devices" }
+        return account
     }
 
     private fun requireAccount(): JSONObject {

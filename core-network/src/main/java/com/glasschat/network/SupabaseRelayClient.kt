@@ -64,6 +64,36 @@ class SupabaseRelayClient(baseUrl: String, anonKey: String) {
         rpc(token, "gc_create_invitation", JSONObject().put("p_expires_at", expiresAtIso))
     )
 
+    /** Server-authoritative account/device administration; RPCs enforce the active Owner role. */
+    fun ownerListAccounts(token: String): JSONArray =
+        rpc(token, "gc_owner_list_accounts", JSONObject()) as? JSONArray
+            ?: error("Owner account listing returned an invalid response")
+
+    fun ownerListDevices(token: String, accountId: String): JSONArray {
+        requireUuid(accountId)
+        return rpc(token, "gc_owner_list_devices", JSONObject().put("p_account_id", accountId)) as? JSONArray
+            ?: error("Owner device listing returned an invalid response")
+    }
+
+    fun ownerListAdminAudit(token: String, limit: Int = 100): JSONArray {
+        require(limit in 1..200)
+        return rpc(token, "gc_owner_list_admin_audit", JSONObject().put("p_limit", limit)) as? JSONArray
+            ?: error("Owner audit listing returned an invalid response")
+    }
+
+    fun ownerSetClientStatus(token: String, accountId: String, status: String): Boolean {
+        requireUuid(accountId); require(status in setOf("active", "suspended"))
+        return rpc(token, "gc_owner_set_client_status", JSONObject()
+            .put("p_account_id", accountId).put("p_status", status)) as? Boolean
+            ?: error("Owner account status update returned an invalid response")
+    }
+
+    fun revokeDevice(token: String, deviceId: String): Boolean {
+        requireUuid(deviceId)
+        return rpc(token, "gc_revoke_device", JSONObject().put("p_device_id", deviceId)) as? Boolean
+            ?: error("Device revocation returned an invalid response")
+    }
+
     fun listOwnDevices(token: String, accountId: String): JSONArray {
         requireUuid(accountId)
         val result = request("GET", "/rest/v1/gc_devices?select=id,signal_device_id,registration_id,public_identity_key,status&account_id=eq.$accountId&status=eq.active&order=created_at.asc", null, token)
