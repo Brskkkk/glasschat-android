@@ -88,6 +88,11 @@ data class QueuedSignalDelivery(
  * inbound ratchet advancement and encrypted message persistence, share one local SQLite transaction.
  * The caller must retain ciphertext until transport acknowledgment. No network transport is implemented.
  */
+data class VerifiedPeerTransportDeviceWithTransport(
+    val transportDeviceId: String,
+    val peer: VerifiedPeerTransportDevice
+)
+
 class SignalMessagePipeline(
     private val localStore: SealedLocalStore,
     private val protocolStore: SealedSignalProtocolStore
@@ -173,6 +178,74 @@ class SignalMessagePipeline(
     }
 
     /**
+     * Encrypt one logical message independently for every verified recipient device. Ratchet
+     * advancement, per-device ciphertext outbox rows, delivery mappings and the single visible
+     * local message commit atomically. A failure to encrypt for any device rolls the whole local
+     * batch back; relay submission happens afterward and may yield partial delivery.
+     */
+    @Synchronized
+    fun encryptAndQueueFanout(
+        localAccountId: String,
+        localSignalDeviceId: Int,
+        authenticatedLocalTransportDeviceId: String,
+        recipients: List<VerifiedPeerTransportDeviceWithTransport>,
+        plaintext: String,
+        conversationId: String,
+        now: Long = System.currentTimeMillis()
+    ): List<QueuedSignalDelivery> {
+        require(authenticatedLocalTransportDeviceId.isNotBlank())
+        require(recipients.isNotEmpty() && recipients.size <= 127)
+        require(recipients.map { it.transportDeviceId }.distinct().size == recipients.size) {
+            "Recipient device list contains duplicates"
+        }
+        require(recipients.map { it.peer.accountId }.distinct().size == 1) {
+            "A fan-out batch must target devices belonging to one verified peer account"
+        }
+        require(conversationId.isNotBlank() && plaintext.isNotBlank())
+        val cleartext = plaintext.toByteArray(StandardCharsets.UTF_8)
+        val messageId = java.util.UUID.randomUUID().toString()
+        val expiresAt = now + MAX_RELAY_RETENTION_MS
+        val ciphertextCopies = ArrayList<QueuedSignalDelivery>(recipients.size)
+        try {
+            require(cleartext.size <= SignalCiphertextEnvelope.MAX_SERIALIZED_MESSAGE_BYTES) {
+                "Message exceeds the supported size"
+            }
+            return localStore.inTransaction {
+                val rows = ciphertextCopies
+                val deviceStates = org.json.JSONArray()
+                recipients.forEach { target ->
+                    require(target.peer.signalDeviceId in 1..127 && target.transportDeviceId.isNotBlank())
+                    require(target.peer.conversationId == conversationId)
+                    val deliveryId = java.util.UUID.randomUUID().toString()
+                    val envelope = crypto.encrypt(localAccountId, localSignalDeviceId,
+                        target.peer.accountId, target.peer.signalDeviceId, cleartext)
+                    val encoded = SignalCiphertextEnvelopeCodec.encode(envelope)
+                    try {
+                        localStore.queueCiphertext(CiphertextDelivery(deliveryId,
+                            authenticatedLocalTransportDeviceId, target.transportDeviceId, encoded, expiresAt), now)
+                        localStore.put("device", fanoutMappingId(deliveryId), JSONObject()
+                            .put("fanoutMessageId", messageId).put("deliveryId", deliveryId)
+                            .put("recipientTransportDeviceId", target.transportDeviceId), createdAt = now)
+                        deviceStates.put(JSONObject().put("deliveryId", deliveryId)
+                            .put("recipientTransportDeviceId", target.transportDeviceId)
+                            .put("signalDeviceId", target.peer.signalDeviceId)
+                            .put("state", QUEUED_DELIVERY))
+                        rows += QueuedSignalDelivery(deliveryId, target.transportDeviceId, expiresAt, encoded.copyOf())
+                    } finally { encoded.fill(0) }
+                }
+                localStore.put("message", messageId, JSONObject().put("id", messageId)
+                    .put("conversationId", conversationId).put("sender", "You").put("text", plaintext)
+                    .put("createdAt", now).put("delivery", QUEUED_DELIVERY)
+                    .put("deviceDeliveries", deviceStates), conversationId, now)
+                rows
+            }
+        } catch (failure: Throwable) {
+            ciphertextCopies.forEach { it.ciphertext.fill(0) }
+            throw failure
+        } finally { cleartext.fill(0) }
+    }
+
+    /**
      * Decrypt and durably save one authenticated relay delivery. The network caller must derive the
      * authenticated local and sender device IDs from its verified token/device directory, then pass
      * those mappings here. Repeated delivery IDs
@@ -255,21 +328,55 @@ class SignalMessagePipeline(
     @Synchronized
     fun markRelayAccepted(deliveryId: String, recipientTransportDeviceId: String, acceptedAt: Long = System.currentTimeMillis()) {
         localStore.inTransaction {
-            val message = localStore.get("message", deliveryId)
+            val fanoutId = fanoutMappingId(deliveryId)
+            val fanout = localStore.get("device", fanoutId)
+            val messageId = fanout?.optString("fanoutMessageId").orEmpty().ifBlank { deliveryId }
+            val message = localStore.get("message", messageId)
+            if (fanout != null) check(message != null) { "Fan-out message record is missing" }
             if (message != null) {
-                check(message.optString("delivery") == QUEUED_DELIVERY) { "Message is not awaiting relay acceptance" }
-                message.put("delivery", RELAY_ACCEPTED_DELIVERY).put("relayAcceptedAt", acceptedAt)
-                localStore.put("message", deliveryId, message, message.optString("conversationId"), message.optLong("createdAt", acceptedAt))
+                val states = message.optJSONArray("deviceDeliveries")
+                if (fanout != null) {
+                    check(fanout.optString("recipientTransportDeviceId") == recipientTransportDeviceId) {
+                        "Relay recipient does not match the fan-out device mapping"
+                    }
+                    check(states != null) { "Fan-out message is missing per-device delivery state" }
+                    var matched = false
+                    for (index in 0 until states.length()) {
+                        val state = states.optJSONObject(index) ?: continue
+                        if (state.optString("deliveryId") == deliveryId &&
+                            state.optString("recipientTransportDeviceId") == recipientTransportDeviceId) {
+                            state.put("state", RELAY_ACCEPTED_DELIVERY).put("relayAcceptedAt", acceptedAt)
+                            matched = true
+                            break
+                        }
+                    }
+                    check(matched) { "Fan-out delivery is not mapped to this message" }
+                    val accepted = (0 until states.length()).count { states.optJSONObject(it)?.optString("state") == RELAY_ACCEPTED_DELIVERY }
+                    val aggregate = when {
+                        accepted == states.length() -> RELAY_ACCEPTED_DELIVERY
+                        accepted > 0 -> PARTIAL_DELIVERY
+                        else -> QUEUED_DELIVERY
+                    }
+                    message.put("deviceDeliveries", states).put("delivery", aggregate)
+                } else {
+                    check(message.optString("delivery") == QUEUED_DELIVERY) { "Message is not awaiting relay acceptance" }
+                    message.put("delivery", RELAY_ACCEPTED_DELIVERY).put("relayAcceptedAt", acceptedAt)
+                }
+                localStore.put("message", messageId, message, message.optString("conversationId"), message.optLong("createdAt", acceptedAt))
             }
             check(localStore.acknowledgeCiphertext(deliveryId, recipientTransportDeviceId)) {
                 "Relay accepted the message but its local ciphertext copy could not be cleared"
             }
+            if (fanout != null) check(localStore.delete("device", fanoutId)) { "Fan-out mapping could not be cleared" }
         }
     }
+
+    private fun fanoutMappingId(deliveryId: String) = "fanout_delivery:$deliveryId"
 
     private companion object {
         const val QUEUED_DELIVERY = "encrypted_queued_not_delivered"
         const val RELAY_ACCEPTED_DELIVERY = "relay_accepted_recipient_not_confirmed"
+        const val PARTIAL_DELIVERY = "encrypted_partially_accepted"
         const val RECEIVED_DELIVERY = "received_encrypted_local"
         const val MAX_RELAY_RETENTION_MS = 7L * 24 * 60 * 60 * 1000
     }

@@ -243,16 +243,21 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
         val own = requireAccount(); val local = requireLocalDevice(own.getString("id"))
         val peers = verifiedPeers().filterValues { it.conversationId == conversationId }
         check(peers.isNotEmpty()) { "No verified peer session is linked to this conversation" }
-        check(peers.size == 1) {
-            "This conversation has multiple verified peer devices. Multi-device delivery is not supported yet, so no message was sent."
+        check(peers.values.map { it.accountId }.distinct().size == 1) {
+            "This conversation is linked to more than one peer account; refusing ambiguous fan-out."
         }
-        val (transportDeviceId, peer) = peers.entries.single()
-        val messaging = messaging(own.getString("id"), local)
-        val result = messaging.sendText(peer, transportDeviceId, conversationId, text)
-        return when (result.state) {
-            SendState.ENCRYPTED_QUEUED_NOT_DELIVERED -> "Encrypted and queued locally; relay delivery is not confirmed."
-            SendState.RELAY_ACCEPTED_RECIPIENT_NOT_CONFIRMED -> "Encrypted ciphertext accepted by relay; recipient receipt is not confirmed."
-            SendState.RELAY_ACCEPTED_LOCAL_STATE_PENDING -> "Relay accepted ciphertext; local outbox cleanup is pending and recipient receipt is unconfirmed."
+        val targets = peers.map { (transportId, peer) -> VerifiedPeerTransportDeviceWithTransport(transportId, peer) }
+        val results = messaging(own.getString("id"), local).sendTextToDevices(targets, conversationId, text)
+        val accepted = results.count { it.state == SendState.RELAY_ACCEPTED_RECIPIENT_NOT_CONFIRMED }
+        val queued = results.count { it.state == SendState.ENCRYPTED_QUEUED_NOT_DELIVERED }
+        val cleanupPending = results.count { it.state == SendState.RELAY_ACCEPTED_LOCAL_STATE_PENDING }
+        return when {
+            accepted == results.size -> "Encrypted message accepted by the relay for all ${results.size} verified devices; recipient receipts are unconfirmed."
+            accepted > 0 && cleanupPending == 0 -> "Encrypted message accepted for $accepted of ${results.size} verified devices; the remaining copies are queued locally. Recipient receipts are unconfirmed."
+            accepted > 0 -> "Relay accepted copies for $accepted of ${results.size} devices; local cleanup is pending for $cleanupPending more and $queued remain queued. Recipient receipts are unconfirmed."
+            queued == results.size -> "Encrypted copies for all ${results.size} verified devices are queued locally; relay acceptance is not confirmed."
+            cleanupPending > 0 -> "Relay accepted $cleanupPending device copies, but local cleanup is pending; $queued others remain queued. Recipient receipts are unconfirmed."
+            else -> "Encrypted message fan-out is incomplete; check each device's local delivery state."
         }
     }
 
@@ -272,7 +277,8 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
         val results = messaging(own.getString("id"), local).retryPending()
         val accepted = results.count { it.state == SendState.RELAY_ACCEPTED_RECIPIENT_NOT_CONFIRMED }
         val stillQueued = results.count { it.state == SendState.ENCRYPTED_QUEUED_NOT_DELIVERED }
-        return "Queued ciphertext retries: $accepted relay-accepted, $stillQueued still queued; recipient receipts remain unconfirmed."
+        val cleanupPending = results.count { it.state == SendState.RELAY_ACCEPTED_LOCAL_STATE_PENDING }
+        return "Queued ciphertext retries: $accepted relay-accepted, $stillQueued still queued, $cleanupPending awaiting local cleanup; recipient receipts remain unconfirmed."
     }
 
     @Synchronized

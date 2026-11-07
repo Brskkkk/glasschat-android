@@ -686,6 +686,16 @@ fun LocalMessengerScreen(
                             Spacer(Modifier.height(4.dp))
                             ChatText(deliveryLabel(deliveryState), Color(0xFF9FA6B5), 10)
                         }
+                        item.optJSONArray("deviceDeliveries")?.let { copies ->
+                            for (index in 0 until copies.length()) {
+                                val copy = copies.optJSONObject(index) ?: continue
+                                Spacer(Modifier.height(2.dp))
+                                ChatText(
+                                    "Signal device ${copy.optInt("signalDeviceId")}: ${deliveryLabel(copy.optString("state"))}",
+                                    Color(0xFF9FA6B5), 9
+                                )
+                            }
+                        }
                         Spacer(Modifier.height(7.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             SmallAction("Edit local", {
@@ -788,6 +798,7 @@ private fun deliveryLabel(state: String): String = when (state) {
     "local_only" -> "Only on this device · not delivered"
     "encrypted_queued_not_delivered" -> "Encrypted · queued on this device · not delivered"
     "relay_accepted_recipient_not_confirmed" -> "Encrypted · relay accepted · recipient receipt unconfirmed"
+    "encrypted_partially_accepted" -> "Encrypted · relay accepted on some devices; remaining copies are queued"
     "received_encrypted_local" -> "Received encrypted · saved on this device"
     else -> state.replace('_', ' ')
 }

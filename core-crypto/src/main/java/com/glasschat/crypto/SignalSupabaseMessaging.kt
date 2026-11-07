@@ -96,6 +96,42 @@ class SignalSupabaseMessaging(
         }
     }
 
+    /** Independently ratchet-encrypt and submit to every verified device in the same peer account. */
+    @Synchronized
+    fun sendTextToDevices(
+        recipients: List<VerifiedPeerTransportDeviceWithTransport>,
+        conversationId: String,
+        text: String,
+        now: Long = System.currentTimeMillis()
+    ): List<SecureSendResult> {
+        require(recipients.isNotEmpty())
+        require(recipients.all { it.peer.conversationId == conversationId })
+        val queued = pipeline.encryptAndQueueFanout(
+            localAccountId = localAccountId,
+            localSignalDeviceId = localSignalDeviceId,
+            authenticatedLocalTransportDeviceId = localTransportDeviceId,
+            recipients = recipients,
+            plaintext = text,
+            conversationId = conversationId,
+            now = now
+        )
+        return queued.map { delivery ->
+            var confirmed = false
+            try {
+                submit(delivery.deliveryId, delivery.recipientDeviceId, delivery.ciphertext, delivery.expiresAt)
+                confirmed = true
+                pipeline.markRelayAccepted(delivery.deliveryId, delivery.recipientDeviceId)
+                SecureSendResult(delivery.deliveryId, SendState.RELAY_ACCEPTED_RECIPIENT_NOT_CONFIRMED,
+                    "Encrypted ciphertext accepted for this device; recipient receipt is unconfirmed.")
+            } catch (_: Exception) {
+                if (confirmed) SecureSendResult(delivery.deliveryId, SendState.RELAY_ACCEPTED_LOCAL_STATE_PENDING,
+                    "Relay accepted this device's ciphertext; local outbox cleanup is pending.")
+                else SecureSendResult(delivery.deliveryId, SendState.ENCRYPTED_QUEUED_NOT_DELIVERED,
+                    "This device's encrypted copy remains queued locally; relay acceptance is unconfirmed.")
+            } finally { delivery.ciphertext.fill(0) }
+        }
+    }
+
     /** Retry safely after network restoration; each result retains its own delivery ID/state. */
     @Synchronized
     fun retryPending(now: Long = System.currentTimeMillis()): List<SecureSendResult> {
