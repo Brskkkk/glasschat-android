@@ -1215,3 +1215,8 @@ private fun refreshMessages(
         ChatText(label, Color.White, 12, FontWeight.Medium)
     }
 }
+
+// Keep trailing-lambda call sites ergonomic while preserving the legacy positional form.
+@Composable private fun SmallAction(label: String, onClick: () -> Unit) = SmallAction(label, onClick, false)
+
+@Composable private fun SmallAction(label: String, secondary: Boolean, onClick: () -> Unit) = SmallAction(label, onClick, secondary)

@@ -204,7 +204,7 @@ class SignalSupabaseMessaging(
                 val complete = deviceStates != null && (0 until deviceStates.length()).all { index ->
                     val state = deviceStates.optJSONObject(index) ?: return@all false
                     state.optString("state") in setOf(
-                        SignalMessagePipeline.RELAY_ACCEPTED_DELIVERY, "recipient_stored"
+                        "relay_accepted_recipient_not_confirmed", "recipient_stored"
                     ) || state.optString("deliveryId") in pendingIds
                 }
                 if (!complete) {

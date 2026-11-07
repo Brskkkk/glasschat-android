@@ -10,9 +10,9 @@ This guide describes the GlassChat Owner and GlassChat Client preview source and
 
 ## Install the supplied debug preview
 
-The private GitHub prerelease should contain `GlassChat-Owner-debug.apk` and `GlassChat-Client-debug.apk`. Download them only while signed into an account authorized to view the private repository. On the Android device, open each APK and allow installation from that source if Android asks. Android may show an unknown-source warning because these are debug-signed builds. The Owner and Client APKs can coexist.
+The private GitHub prerelease `v0.1.0-preview.1` contains `GlassChat-Owner-debug.apk` and `GlassChat-Client-debug.apk`. Download them only while signed into an account authorized to view the private repository. Both are arm64-v8a-only; they will not install on x86/x86_64 or 32-bit ARM devices. On the Android device, open each APK and allow installation from that source if Android asks. Android may show an unknown-source warning because these are debug-signed builds. The Owner and Client APKs can coexist.
 
-These are debug builds signed with Gradle's debug key. They are not production release-signed. Do not use them as a secure production service, and do not expect a future release-key build to update them seamlessly.
+Both APKs were successfully assembled and their package IDs and v2 signatures checked. The Client build logged D8 warnings while rewriting Kotlin metadata, although Gradle completed successfully; treat this as a preview and do not assume runtime stability. Each APK is approximately 194 MB. These are debug builds signed with Gradle's debug key. They are not production release-signed. Do not use them as a secure production service, and do not expect a future release-key build to update them seamlessly.
 
 ## Build from source
 
@@ -22,7 +22,7 @@ Requirements: JDK 17, Android SDK platform/build tools for API 35, and network a
 ./gradlew --no-daemon :app-owner:assembleDebug :app-client:assembleDebug
 ```
 
-Outputs:
+For this preview, both app modules are configured for `arm64-v8a` only to keep the packaged Signal native runtime within available build storage. Outputs:
 
 ```text
 app-owner/build/outputs/apk/debug/app-owner-debug.apk
@@ -35,7 +35,7 @@ To run the repository's unit-test tasks (there may be no test source sets yet):
 ./gradlew --no-daemon test
 ```
 
-Do not treat a successful build as verification of the server or cryptographic interoperability. Current delivery is debug APKs only; production signing and reproducible release signing are not configured.
+The Owner and Client debug APKs were assembled separately and verified as package `com.glasschat.owner` / `com.glasschat.client`, version `0.1.0`, with the Android debug certificate. No unit/integration tests, emulator/device launch, live server, security review or cryptographic interoperability checks were run. The Client packaging emitted D8 Kotlin metadata rewrite warnings. Do not treat a successful build as verification of the server or cryptographic interoperability. Current delivery is debug APKs only; production signing and reproducible release signing are not configured.
 
 ## Live Supabase setup required
 
