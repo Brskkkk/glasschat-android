@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.ClipData
 import android.content.ClipboardManager
 import com.glasschat.data.SealedLocalStore
+import com.glasschat.crypto.GlassChatSecureRuntime
 import android.os.Handler
 import android.os.Looper
 import org.json.JSONObject
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.text.BasicText
@@ -30,7 +32,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/** Local-device messaging workspace. It deliberately makes no network/E2EE delivery claim. */
+/** Shared Owner/Client workspace: local-first, with an optional fail-closed Signal/Supabase path. */
 @Composable
 fun LocalMessengerScreen(
     context: Context,
@@ -43,13 +45,12 @@ fun LocalMessengerScreen(
     onStopServer: () -> Unit = {},
     autoStartEnabled: Boolean = false,
     lastServerStartMillis: Long = 0L,
-    onAutoStartChanged: (Boolean) -> Unit = {},
-    secureSend: ((conversationId: String, text: String) -> String)? = null,
-    secureReceive: (() -> String)? = null
+    onAutoStartChanged: (Boolean) -> Unit = {}
 ) {
     val appContext = context.applicationContext
     val clipboard = remember(appContext) { appContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager }
     val store = remember { SealedLocalStore(appContext) }
+    val secureRuntime = remember(store) { GlassChatSecureRuntime(store) }
     val executor = remember { Executors.newSingleThreadExecutor() }
     val main = remember { Handler(Looper.getMainLooper()) }
     val conversations = remember { mutableStateListOf<JSONObject>() }
@@ -75,6 +76,23 @@ fun LocalMessengerScreen(
     var profileAbout by remember { mutableStateOf("") }
     var newInviteCode by remember { mutableStateOf("") }
     var revokeInviteInput by remember { mutableStateOf("") }
+    var secureState by remember { mutableStateOf("Not configured — local-only; no message leaves this device.") }
+    var projectEndpoint by remember { mutableStateOf("") }
+    var projectAnonKey by remember { mutableStateOf("") }
+    var authEmail by remember { mutableStateOf("") }
+    var authPassword by remember { mutableStateOf("") }
+    var inviteCodeInput by remember { mutableStateOf("") }
+    var accountUsernameInput by remember { mutableStateOf("") }
+    var accountDisplayNameInput by remember { mutableStateOf("") }
+    var peerAccountIdInput by remember { mutableStateOf("") }
+    var peerDeviceInput by remember { mutableStateOf("") }
+    var peerFingerprintInput by remember { mutableStateOf("") }
+    var accountSummary by remember { mutableStateOf<JSONObject?>(null) }
+    val peerCandidates = remember { mutableStateListOf<JSONObject>() }
+    var hasVerifiedPeer by remember { mutableStateOf(false) }
+    var selectedPeerReady by remember { mutableStateOf(false) }
+    val activeSecureSend: ((String, String) -> String)? = if (selectedPeerReady) ({ conversationId, text -> secureRuntime.send(conversationId, text) }) else null
+    val activeSecureReceive: (() -> String)? = if (selectedPeerReady) ({ secureRuntime.receive() }) else null
     val baseTheme = glassTheme(themeId)
     val customAccent = parseThemeColor(customAccentHex)
     val theme = if (customAccent == null) baseTheme else baseTheme.copy(accent = customAccent, swatch = customAccent)
@@ -151,10 +169,18 @@ fun LocalMessengerScreen(
         refreshOwnerAccounts()
         refreshOwnerAudit()
         executor.execute {
+            val config = try { secureRuntime.projectConfiguration() } catch (_: Exception) { null }
+            val secureStatus = try { secureRuntime.currentState() } catch (_: Exception) { "Secure messaging is not configured." }
+            val account = try { secureRuntime.currentAccountSummary() } catch (_: Exception) { null }
+            val verified = try { secureRuntime.hasVerifiedPeers() } catch (_: Exception) { false }
             val savedTheme = try { store.get("setting", "theme")?.optString("id") } catch (_: Exception) { null }
             val savedAccent = try { store.get("setting", "custom_accent")?.optString("hex") } catch (_: Exception) { null }
             val savedProfile = try { store.get("setting", "local_profile") } catch (_: Exception) { null }
             main.post {
+                if (config != null) { projectEndpoint = config.optString("endpoint"); projectAnonKey = config.optString("anonKey") }
+                secureState = secureStatus
+                accountSummary = account
+                hasVerifiedPeer = verified
                 if (!savedTheme.isNullOrBlank()) themeId = savedTheme
                 if (!savedAccent.isNullOrBlank()) { customAccentHex = savedAccent; accentInput = savedAccent }
                 if (savedProfile != null) {
@@ -163,6 +189,13 @@ fun LocalMessengerScreen(
                     profileAbout = savedProfile.optString("about")
                 }
             }
+        }
+    }
+    LaunchedEffect(selectedId, hasVerifiedPeer) {
+        val conversationId = selectedId
+        executor.execute {
+            val ready = conversationId != null && secureRuntime.hasVerifiedPeer(conversationId)
+            main.post { if (selectedId == conversationId) selectedPeerReady = ready }
         }
     }
     LaunchedEffect(selectedId, messageInput, editingMessageId) {
@@ -185,15 +218,160 @@ fun LocalMessengerScreen(
             ChatText("GLASSCHAT  ${if (owner) "OWNER" else "CLIENT"}", Color.White, 13, FontWeight.Bold)
             ChatText("Your private space", Color.White, 28, FontWeight.SemiBold)
             Panel {
-                ChatText(if (secureSend != null && secureReceive != null) "SECURE MESSAGING CONTROLS AVAILABLE" else "LOCAL-ONLY FOUNDATION", theme.accent, 11, FontWeight.Bold)
+                ChatText(if (selectedPeerReady && activeSecureSend != null && activeSecureReceive != null) "VERIFIED PEER SESSION · RELAY STATUS SHOWN PER MESSAGE" else "LOCAL-ONLY · NO VERIFIED SESSION FOR THIS CHAT", theme.accent, 11, FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
                 ChatText(
-                    if (secureSend != null && secureReceive != null)
-                        "The configured secure messaging callbacks use Signal ciphertext and authenticated relay status; recipient receipt is shown separately."
-                    else
-                        "Live messaging is unavailable: no authenticated relay or verified Signal session is connected. Saving here keeps a local-only copy; there is no plaintext send fallback.",
+                    secureState + if (hasVerifiedPeer) " A verified Signal session is configured; each send still reports whether the relay accepted ciphertext." else " No verified peer session is ready; local saves stay on this device.",
                     Color(0xFFE8E9F0), 14
                 )
+            }
+            Panel {
+                ChatText("SECURE ACCOUNT + DEVICE SETUP", Color.White, 16, FontWeight.SemiBold)
+                Spacer(Modifier.height(5.dp))
+                ChatText("Uses your Supabase project URL and public anon key only. Never paste a service-role key. This stays disabled until the service is configured; messages have no plaintext network fallback.", Color(0xFFBFC4D0), 12)
+                Spacer(Modifier.height(8.dp))
+                Entry(projectEndpoint, { projectEndpoint = it }, "https://your-project.supabase.co")
+                Spacer(Modifier.height(6.dp))
+                Entry(projectAnonKey, { projectAnonKey = it }, "Supabase public anon key")
+                Spacer(Modifier.height(7.dp))
+                SmallAction("Save project configuration") {
+                    executor.execute {
+                        try {
+                            secureRuntime.configure(projectEndpoint.trim(), projectAnonKey.trim())
+                            val state = secureRuntime.currentState()
+                            main.post { secureState = state; notice = "Project configuration saved on this device." }
+                        } catch (e: Exception) { main.post { notice = "Could not save project configuration: ${e.message ?: "check HTTPS URL and public anon key"}" } }
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Entry(authEmail, { authEmail = it }, "Supabase Auth email")
+                Spacer(Modifier.height(6.dp))
+                SecretEntry(authPassword, { authPassword = it }, "Supabase Auth password")
+                Spacer(Modifier.height(7.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    SmallAction("Create Supabase login") {
+                        val email = authEmail.trim(); val password = authPassword.toCharArray(); authPassword = ""
+                        if (email.isBlank() || password.isEmpty()) { password.fill('\u0000'); notice = "Enter your email and password." }
+                        else executor.execute {
+                            try {
+                                val result = secureRuntime.signUp(email, password)
+                                val status = secureRuntime.currentState()
+                                val account = try { secureRuntime.currentAccountSummary() } catch (_: Exception) { null }
+                                val verified = secureRuntime.hasVerifiedPeers()
+                                main.post { secureState = status; accountSummary = account; hasVerifiedPeer = verified; notice = result }
+                            } catch (e: Exception) { main.post { notice = "Supabase sign-up did not complete: ${e.message ?: "check project settings"}" } }
+                        }
+                    }
+                    SmallAction("Sign in") {
+                        val email = authEmail.trim(); val password = authPassword.toCharArray(); authPassword = ""
+                        if (email.isBlank() || password.isEmpty()) { password.fill('\u0000'); notice = "Enter your email and password." }
+                        else executor.execute {
+                            try {
+                                val result = secureRuntime.signIn(email, password)
+                                val status = secureRuntime.currentState()
+                                val account = try { secureRuntime.currentAccountSummary() } catch (_: Exception) { null }
+                                val verified = secureRuntime.hasVerifiedPeers()
+                                main.post { secureState = status; accountSummary = account; hasVerifiedPeer = verified; notice = result }
+                            } catch (e: Exception) { main.post { notice = "Sign-in did not complete: ${e.message ?: "check credentials and email verification"}" } }
+                        }
+                    }
+                }
+                accountSummary?.let { account ->
+                    Spacer(Modifier.height(7.dp))
+                    ChatText("Account: ${account.optString("username")} · ${account.optString("role")} · ${account.optString("id")}", Color(0xFFE8E9F0), 11)
+                }
+                Spacer(Modifier.height(8.dp))
+                if (owner) {
+                    SmallAction("Create server invitation (Owner only)") {
+                        executor.execute {
+                            try {
+                                val code = secureRuntime.createInvitation()
+                                main.post { newInviteCode = code; notice = "Server invitation created. Copy it now; it is shown only here." }
+                            } catch (e: Exception) { main.post { notice = "Could not create server invitation: ${e.message ?: "sign in with an Owner account"}" } }
+                        }
+                    }
+                    if (newInviteCode.isNotBlank()) {
+                        Spacer(Modifier.height(6.dp)); ChatText("One-time server invitation: $newInviteCode", Color(0xFFFFD989), 11)
+                        Spacer(Modifier.height(5.dp)); SmallAction("Copy server invitation") {
+                            clipboard.setPrimaryClip(ClipData.newPlainText("GlassChat invitation", newInviteCode))
+                            notice = "Copied; treat clipboard as sensitive until cleared."
+                        }
+                    }
+                } else {
+                    Entry(inviteCodeInput, { inviteCodeInput = it }, "One-time Owner invitation")
+                    Spacer(Modifier.height(6.dp)); Entry(accountUsernameInput, { accountUsernameInput = it }, "Username (3–32 lowercase letters, digits, underscore)")
+                    Spacer(Modifier.height(6.dp)); Entry(accountDisplayNameInput, { accountDisplayNameInput = it }, "Display name")
+                    Spacer(Modifier.height(6.dp))
+                    SmallAction("Redeem invitation") {
+                        val code = inviteCodeInput.trim(); val username = accountUsernameInput.trim(); val name = accountDisplayNameInput.trim()
+                        executor.execute {
+                            try {
+                                val result = secureRuntime.redeemInvitation(code, username, name)
+                                val status = secureRuntime.currentState(); val account = secureRuntime.currentAccountSummary()
+                                main.post { secureState = status; accountSummary = account; inviteCodeInput = ""; notice = result }
+                            } catch (e: Exception) { main.post { notice = "Invitation redemption failed: ${e.message ?: "check invitation and account state"}" } }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                SmallAction("Register this device + publish Signal public keys") {
+                    executor.execute {
+                        try {
+                            val result = secureRuntime.initializeDevice()
+                            val status = secureRuntime.currentState()
+                            main.post { secureState = status; notice = result }
+                        } catch (e: Exception) { main.post { notice = "Device setup stopped safely: ${e.message ?: "service setup is incomplete"}" } }
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                ChatText("PEER VERIFICATION", Color.White, 13, FontWeight.SemiBold)
+                ChatText("Exchange account UUIDs out of band. Each person must approve the other before public device keys appear. Compare the full Signal fingerprint out of band before fetching a one-time prekey.", Color(0xFFBFC4D0), 11)
+                Spacer(Modifier.height(6.dp)); Entry(peerAccountIdInput, { peerAccountIdInput = it }, "Peer GlassChat account UUID")
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    SmallAction("Approve peer") {
+                        executor.execute {
+                            try { secureRuntime.approveContact(peerAccountIdInput); main.post { notice = "Your contact approval is saved. The peer must also approve you." } }
+                            catch (e: Exception) { main.post { notice = "Could not approve peer: ${e.message ?: "check account UUID and sign-in"}" } }
+                        }
+                    }
+                    SmallAction("Refresh approved devices") {
+                        executor.execute {
+                            try {
+                                val candidates = secureRuntime.loadContactDevices(peerAccountIdInput)
+                                main.post { peerCandidates.clear(); peerCandidates.addAll(candidates); notice = if (candidates.isEmpty()) "No active peer devices are published yet." else "Mutually approved device fingerprints loaded. Compare one out of band before continuing." }
+                            } catch (e: Exception) { main.post { notice = "Could not load peer devices; both accounts must approve contact first." } }
+                        }
+                    }
+                }
+                peerCandidates.forEach { candidate ->
+                    Spacer(Modifier.height(6.dp))
+                    val device = candidate.optString("transportId")
+                    ChatText("Signal device ${candidate.optInt("signalDeviceId")} · ${candidate.optString("fingerprint")}", Color(0xFFE8E9F0), 10)
+                    SmallAction(if (device == peerDeviceInput) "Selected peer device" else "Use this device", { peerDeviceInput = device })
+                }
+                Spacer(Modifier.height(6.dp)); Entry(peerFingerprintInput, { peerFingerprintInput = it }, "Type the full fingerprint you compared in person")
+                Spacer(Modifier.height(6.dp))
+                SmallAction("Verify fingerprint + establish Signal session") {
+                    val conversationId = selectedId
+                    if (conversationId == null || peerDeviceInput.isBlank()) notice = "Choose a conversation and peer device first."
+                    else executor.execute {
+                        try {
+                            val result = secureRuntime.verifyPeerAndEstablishSession(peerDeviceInput, conversationId, peerFingerprintInput)
+                            val status = secureRuntime.currentState(); val verified = secureRuntime.hasVerifiedPeers()
+                            val peerReady = secureRuntime.hasVerifiedPeer(conversationId)
+                            main.post { secureState = status; hasVerifiedPeer = verified; selectedPeerReady = peerReady; notice = result }
+                        } catch (e: Exception) { main.post { notice = "Peer verification stopped safely: ${e.message ?: "compare the fingerprint and verify mutual consent"}" } }
+                    }
+                }
+                if (hasVerifiedPeer) {
+                    Spacer(Modifier.height(7.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        SmallAction("Retry encrypted queue") {
+                            executor.execute { try { val result = secureRuntime.retryQueued(); main.post { notice = result; selectedId?.let { refreshMessages(store, executor, main, it, messages) { msg -> notice = msg } } } } catch (_: Exception) { main.post { notice = "Encrypted queue retry is unavailable; no plaintext was sent." } } }
+                        }
+                    }
+                }
             }
             Panel {
                 ChatText("THEME STUDIO", Color.White, 16, FontWeight.SemiBold)
@@ -272,7 +450,7 @@ fun LocalMessengerScreen(
             if (owner) Panel {
                 ChatText("OWNER SERVICE", Color.White, 17, FontWeight.SemiBold)
                 Spacer(Modifier.height(6.dp)); ChatText(ownerServiceStatus, theme.accent, 13)
-                Spacer(Modifier.height(4.dp)); ChatText("The foreground-service lifecycle is present, but no API, relay, registration authority or gateway is connected.", Color(0xFFBFC4D0), 13)
+                Spacer(Modifier.height(4.dp)); ChatText("This foreground service does not host the relay. Supabase messaging works only after an operator deploys the migrations and you configure its HTTPS URL and public anon key above.", Color(0xFFBFC4D0), 13)
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     SmallAction("Start", onStartServer)
@@ -455,7 +633,7 @@ fun LocalMessengerScreen(
                 val selectedConversation = conversations.firstOrNull { it.optString("id") == selectedId }
                 ChatText(selectedName, Color.White, 17, FontWeight.SemiBold)
                 Spacer(Modifier.height(5.dp)); ChatText(
-                    if (secureSend != null) "Encrypted messaging · delivery state shown per message" else "Stored locally · not sent",
+                    if (activeSecureSend != null) "Encrypted messaging · delivery state shown per message" else "Stored locally · not sent",
                     theme.accent, 12
                 )
                 Spacer(Modifier.height(7.dp))
@@ -474,11 +652,11 @@ fun LocalMessengerScreen(
                     }
                 }
                 Spacer(Modifier.height(8.dp))
-                if (secureReceive != null) {
+                if (activeSecureReceive != null) {
                     SmallAction("Check encrypted messages", {
                         executor.execute {
                             try {
-                                val result = secureReceive.invoke()
+                                val result = activeSecureReceive.invoke()
                                 val conversationId = selectedId
                                 main.post { notice = result; if (conversationId != null) refreshChats(conversationId) }
                             } catch (_: Exception) {
@@ -542,7 +720,7 @@ fun LocalMessengerScreen(
                 if (editingMessageId != null) ChatText("Editing this device’s copy only", Color(0xFFFFD7A8), 12)
                 Entry(messageInput, { messageInput = it }, "Write a local note/message")
                 Spacer(Modifier.height(8.dp))
-                SmallAction(if (editingMessageId == null && secureSend != null) "Send encrypted" else if (editingMessageId == null) "Save message on this device" else "Save local edit") {
+                SmallAction(if (editingMessageId == null && activeSecureSend != null) "Send encrypted" else if (editingMessageId == null) "Save message on this device" else "Save local edit") {
                     val text = messageInput.trim(); val conversationId = selectedId; val editingId = editingMessageId
                     if (text.isBlank() || conversationId == null) notice = "Write a message first."
                     else if (editingId != null) {
@@ -552,10 +730,10 @@ fun LocalMessengerScreen(
                                 main.post { messageInput = ""; editingMessageId = null; notice = "Edited this device’s copy only."; refreshChats(conversationId) }
                             } catch (e: Exception) { main.post { notice = "Could not edit local message: ${e.message ?: "storage error"}" } }
                         }
-                    } else if (secureSend != null) {
+                    } else if (activeSecureSend != null) {
                         executor.execute {
                             try {
-                                val status = secureSend.invoke(conversationId, text)
+                                val status = activeSecureSend.invoke(conversationId, text)
                                 main.post { messageInput = ""; notice = status; refreshChats(conversationId) }
                             } catch (_: Exception) {
                                 main.post { notice = "Encrypted send failed; the message was not sent and remains in the composer." }
@@ -591,7 +769,7 @@ fun LocalMessengerScreen(
             if (externalNotice.isNotBlank()) ChatText(externalNotice, Color(0xFFFFC6A5), 13)
             if (notice.isNotBlank()) ChatText(notice, Color(0xFFFFC6A5), 13)
             ChatText(
-                if (secureSend != null && secureReceive != null) "No plaintext send or receive fallback is available."
+                if (activeSecureSend != null && activeSecureReceive != null) "No plaintext send or receive fallback is available."
                 else "No remote account or service is configured.",
                 Color(0xFF9FA6B5), 12
             )
@@ -631,6 +809,13 @@ private fun refreshMessages(
     Box(Modifier.fillMaxWidth().background(Color(0x283FFFFFF), RoundedCornerShape(12.dp)).border(1.dp, Color(0x42FFFFFF), RoundedCornerShape(12.dp)).padding(12.dp)) {
         if (value.isEmpty()) ChatText(hint, Color(0xFF9FA6B5), 13)
         BasicTextField(value, update, modifier = Modifier.fillMaxWidth(), textStyle = TextStyle(color = Color.White, fontSize = 14.sp), singleLine = true)
+    }
+}
+
+@Composable private fun SecretEntry(value: String, update: (String) -> Unit, hint: String) {
+    Box(Modifier.fillMaxWidth().background(Color(0x283FFFFFF), RoundedCornerShape(12.dp)).border(1.dp, Color(0x42FFFFFF), RoundedCornerShape(12.dp)).padding(12.dp)) {
+        if (value.isEmpty()) ChatText(hint, Color(0xFF9FA6B5), 13)
+        BasicTextField(value, update, modifier = Modifier.fillMaxWidth(), textStyle = TextStyle(color = Color.White, fontSize = 14.sp), singleLine = true, visualTransformation = PasswordVisualTransformation())
     }
 }
 

@@ -27,6 +27,20 @@ class SupabaseRelayClient(baseUrl: String, anonKey: String) {
         anon = anonKey.trim()
     }
 
+    /** Create a Supabase Auth user. Email confirmation may be required by project policy. */
+    fun signUp(email: String, password: CharArray): SupabaseSession? {
+        require(email.isNotBlank() && password.isNotEmpty())
+        val body = JSONObject().put("email", email.trim()).put("password", String(password))
+        try {
+            val result = request("POST", "/auth/v1/signup", body.toString(), null)
+            val obj = result as? JSONObject ?: error("Supabase Auth returned an invalid response")
+            return if (obj.optString("access_token").isNotBlank()) session(obj) else null
+        } finally {
+            body.put("password", "")
+            password.fill('\u0000')
+        }
+    }
+
     fun signIn(email: String, password: CharArray): SupabaseSession {
         require(email.isNotBlank() && password.isNotEmpty())
         val body = JSONObject().put("email", email.trim()).put("password", String(password))
@@ -44,6 +58,16 @@ class SupabaseRelayClient(baseUrl: String, anonKey: String) {
         val body = JSONObject().put("refresh_token", session.refreshToken)
         val result = request("POST", "/auth/v1/token?grant_type=refresh_token", body.toString(), null)
         return session(result as? JSONObject ?: error("Supabase Auth returned an invalid response"))
+    }
+
+    fun createInvitation(token: String, expiresAtIso: String): String = scalarText(
+        rpc(token, "gc_create_invitation", JSONObject().put("p_expires_at", expiresAtIso))
+    )
+
+    fun listOwnDevices(token: String, accountId: String): JSONArray {
+        requireUuid(accountId)
+        val result = request("GET", "/rest/v1/gc_devices?select=id,signal_device_id,registration_id,public_identity_key,status&account_id=eq.$accountId&status=eq.active&order=created_at.asc", null, token)
+        return result as? JSONArray ?: error("Device lookup returned an invalid response")
     }
 
     fun redeemInvitation(token: String, code: String, username: String, displayName: String): String {
@@ -234,6 +258,8 @@ class SupabaseRelayClient(baseUrl: String, anonKey: String) {
     private fun pgBytea(bytes: ByteArray): String = "\\x" + bytes.joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
     /** PostgREST serializes bytea as the PostgreSQL hex form \"\\x...\" in JSON. */
+    fun pgByteaForLocalStorage(bytes: ByteArray): String = pgBytea(bytes)
+
     fun decodePgBytea(value: String): ByteArray {
         require(value.startsWith("\\x") && value.length > 2 && (value.length - 2) % 2 == 0) {
             "Relay returned malformed ciphertext bytes"

@@ -38,8 +38,8 @@ class SignalCiphertextEnvelope(type: Int, serializedMessage: ByteArray) {
  * Thin adapter over Signal's maintained implementation. It requires the Keystore-encrypted store
  * and an expected peer identity key that the caller obtained through authenticated account lookup
  * and explicit contact verification. It checks both signatures in the supplied bundle and pins the
- * identity before session setup. It cannot authenticate the transport or provide verification UI;
- * no app message path currently invokes it.
+ * identity before session setup. It cannot authenticate the transport; the calling runtime must supply authenticated directory data,
+ * explicit fingerprint verification, and a ciphertext-only transport.
  *
  * Calls are serialized per instance because libsignal's SessionBuilder and SessionCipher are
  * documented as not thread-safe. Use a separate adapter per protocol store, not per coroutine.
