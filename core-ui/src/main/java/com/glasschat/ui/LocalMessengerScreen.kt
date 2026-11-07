@@ -74,6 +74,8 @@ fun LocalMessengerScreen(
     var serverGroupInviteGroupId by remember { mutableStateOf("") }
     val serverGroupRoster = remember { mutableStateListOf<JSONObject>() }
     var serverGroupRosterId by remember { mutableStateOf("") }
+    val serverGroupInvites = remember { mutableStateListOf<JSONObject>() }
+    var serverGroupInvitesId by remember { mutableStateOf("") }
     var messageInput by remember { mutableStateOf("") }
     var editingMessageId by remember { mutableStateOf<String?>(null) }
     var searchInput by remember { mutableStateOf("") }
@@ -850,6 +852,10 @@ fun LocalMessengerScreen(
                                 try {
                                     val code = secureRuntime.createServerGroupInvitation(groupId)
                                     main.post { serverGroupInviteCode = code; serverGroupInviteGroupId = groupId; notice = "Group invitation created; copy and share it privately. It expires in seven days." }
+                                    try {
+                                        val invites = secureRuntime.listServerGroupInvites(groupId)
+                                        main.post { serverGroupInvites.clear(); serverGroupInvites.addAll(invites); serverGroupInvitesId = groupId }
+                                    } catch (_: Exception) { main.post { notice = "Invitation created and shown above; refresh the roster to load revocation controls." } }
                                 } catch (e: Exception) { main.post { notice = "Could not create group invitation: ${e.message ?: "group owner access is required"}" } }
                             }
                         }
@@ -867,13 +873,66 @@ fun LocalMessengerScreen(
                             executor.execute {
                                 try {
                                     val rows = secureRuntime.listServerGroupMembers(groupId)
-                                    main.post { serverGroupRoster.clear(); serverGroupRoster.addAll(rows); serverGroupRosterId = groupId; notice = "Server roster refreshed. Verify every active device for every member before sending." }
-                                } catch (e: Exception) { main.post { notice = "Could not refresh server roster: ${e.message ?: "confirm membership and migration 0008"}" } }
+                                    val inviteRows = if (selectedConversation.optString("role") == "owner") secureRuntime.listServerGroupInvites(groupId) else emptyList()
+                                    main.post {
+                                        serverGroupRoster.clear(); serverGroupRoster.addAll(rows); serverGroupRosterId = groupId
+                                        serverGroupInvites.clear(); serverGroupInvites.addAll(inviteRows); serverGroupInvitesId = groupId
+                                        notice = "Roster refreshed (version ${rows.firstOrNull()?.optLong("membership_version", 0L) ?: 0L}). Verify every active device before sending."
+                                    }
+                                } catch (e: Exception) { main.post { notice = "Could not refresh server group details: ${e.message ?: "check membership and migration 0009"}" } }
                             }
                         }
                         if (serverGroupRosterId == groupId) serverGroupRoster.forEach { member ->
                             Spacer(Modifier.height(4.dp))
-                            ChatText("${member.optString("display_name", member.optString("username"))} · ${member.optString("role")}", Color(0xFFBFC4D0), 11)
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                ChatText("${member.optString("display_name", member.optString("username"))} · ${member.optString("role")}", Color(0xFFBFC4D0), 11)
+                                if (selectedConversation.optString("role") == "owner" && member.optString("role") != "owner") {
+                                    SmallAction("Remove member") {
+                                        val accountId = member.optString("account_id")
+                                        executor.execute {
+                                            var removalConfirmed = false
+                                            try {
+                                                val removed = secureRuntime.removeServerGroupMember(groupId, accountId)
+                                                removalConfirmed = removed
+                                                main.post { notice = if (removed) "Member removed. Stale group copies remain queued locally and cannot relay under the old roster version." else "That member was already removed." }
+                                                val refreshed = secureRuntime.listServerGroupMembers(groupId)
+                                                val invites = secureRuntime.listServerGroupInvites(groupId)
+                                                main.post {
+                                                    serverGroupRoster.clear(); serverGroupRoster.addAll(refreshed)
+                                                    serverGroupInvites.clear(); serverGroupInvites.addAll(invites)
+                                                }
+                                            } catch (e: Exception) {
+                                                main.post { notice = if (removalConfirmed) "Member removed, but the roster refresh failed; tap Refresh server roster." else "Could not confirm member removal; refresh the server roster before retrying." }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (selectedConversation.optString("role") == "owner" && serverGroupInvitesId == groupId) {
+                            Spacer(Modifier.height(7.dp))
+                            ChatText("ACTIVE INVITES", Color.White, 11, FontWeight.SemiBold)
+                            if (serverGroupInvites.isEmpty()) ChatText("No active invitations.", Color(0xFFBFC4D0), 11)
+                            serverGroupInvites.forEach { invite ->
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                    ChatText("Expires ${invite.optString("expires_at")}", Color(0xFFBFC4D0), 10)
+                                    SmallAction("Revoke invite") {
+                                        val inviteId = invite.optString("invite_id")
+                                        executor.execute {
+                                            var revocationConfirmed = false
+                                            try {
+                                                val revoked = secureRuntime.revokeServerGroupInvite(inviteId)
+                                                revocationConfirmed = revoked
+                                                main.post { notice = if (revoked) "Invitation revoked; its code can no longer be used." else "That invitation is already used, expired, or revoked." }
+                                                val refreshed = secureRuntime.listServerGroupInvites(groupId)
+                                                main.post { serverGroupInvites.clear(); serverGroupInvites.addAll(refreshed) }
+                                            } catch (_: Exception) {
+                                                main.post { notice = if (revocationConfirmed) "Invitation revoked, but the list refresh failed; tap Refresh server roster." else "Could not confirm revocation; refresh the active-invite list before retrying." }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                         ChatText("Relay checks that both sender and recipient belong to this group. Sending is blocked until every current member device is mutually approved and its Signal fingerprint is verified. Each message still uses separate pairwise Signal encryption, not Sender-Key.", Color(0xFFBFC4D0), 11)
                     } else {

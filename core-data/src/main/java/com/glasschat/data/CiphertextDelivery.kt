@@ -8,5 +8,7 @@ data class CiphertextDelivery(
     val ciphertext: ByteArray,
     val expiresAt: Long,
     /** Optional server-managed group ID; null for direct and local-only groups. */
-    val groupId: String? = null
+    val groupId: String? = null,
+    /** Group roster snapshot used to authorize this ciphertext; null for non-server-group sends. */
+    val groupMembershipVersion: Long? = null
 )

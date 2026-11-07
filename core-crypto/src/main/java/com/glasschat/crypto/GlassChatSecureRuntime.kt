@@ -151,6 +151,33 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
     }
 
     @Synchronized
+    fun listServerGroupInvites(groupId: String): List<JSONObject> {
+        val conversation = store.get("conversation", groupId) ?: error("Select a saved group first")
+        check(conversation.optBoolean("serverManaged") && conversation.optString("role") == "owner") {
+            "Only the saved server-group Owner can list active invitations"
+        }
+        requireOwnerAccount()
+        val rows = relay().listGroupInvites(accessToken(), groupId)
+        return (0 until rows.length()).mapNotNull { index -> rows.optJSONObject(index)?.let { JSONObject(it.toString()) } }
+    }
+
+    @Synchronized
+    fun removeServerGroupMember(groupId: String, accountId: String): Boolean {
+        val conversation = store.get("conversation", groupId) ?: error("Select a saved group first")
+        check(conversation.optBoolean("serverManaged") && conversation.optString("role") == "owner") {
+            "Only the saved server-group Owner can remove a member"
+        }
+        requireOwnerAccount()
+        return relay().removeGroupMember(accessToken(), groupId, accountId)
+    }
+
+    @Synchronized
+    fun revokeServerGroupInvite(inviteId: String): Boolean {
+        requireOwnerAccount()
+        return relay().revokeGroupInvite(accessToken(), inviteId)
+    }
+
+    @Synchronized
     fun createInvitation(): String {
         val account = requireAccount()
         check(account.optString("role") == "owner") { "Only an authenticated Owner can create invitations" }
@@ -453,12 +480,14 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
         check(conversation.optString("kind") == "group" || peers.values.map { it.accountId }.distinct().size == 1) {
             "A one-to-one conversation may only target one verified peer account."
         }
-        val serverGroupId = if (conversation.optBoolean("serverManaged")) {
+        val serverGroupMembershipVersion = if (conversation.optBoolean("serverManaged")) {
             validateServerGroupRecipientCoverage(conversationId, own.getString("id"), peers)
-            conversationId
         } else null
+        val serverGroupId = serverGroupMembershipVersion?.let { conversationId }
         val targets = peers.map { (transportId, peer) -> VerifiedPeerTransportDeviceWithTransport(transportId, peer) }
-        val results = messaging(own.getString("id"), local).sendTextToDevices(targets, conversationId, text, serverGroupId)
+        val results = messaging(own.getString("id"), local).sendTextToDevices(
+            targets, conversationId, text, serverGroupId, serverGroupMembershipVersion
+        )
         val accepted = results.count { it.state == SendState.RELAY_ACCEPTED_RECIPIENT_NOT_CONFIRMED }
         val queued = results.count { it.state == SendState.ENCRYPTED_QUEUED_NOT_DELIVERED }
         val cleanupPending = results.count { it.state == SendState.RELAY_ACCEPTED_LOCAL_STATE_PENDING }
@@ -476,9 +505,12 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
         groupId: String,
         ownAccountId: String,
         linkedPeers: Map<String, VerifiedPeerTransportDevice>
-    ) {
+    ): Long {
         val token = accessToken()
         val members = relay().listGroupMembers(token, groupId)
+        check(members.length() > 0) { "The server group returned no membership snapshot" }
+        val versions = (0 until members.length()).map { members.getJSONObject(it).optLong("membership_version", -1L) }.toSet()
+        check(versions.size == 1 && versions.single() > 0) { "The server did not return one consistent group roster version" }
         val memberAccounts = (0 until members.length()).mapNotNull { members.optJSONObject(it)?.optString("account_id") }
             .filter { it.isNotBlank() }.toSet()
         check(ownAccountId in memberAccounts) { "Your account is no longer a member of this server group" }
@@ -512,6 +544,7 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
         check(linked.keys == expectedDevices) {
             "The verified device set no longer matches the current group roster; refresh before sending"
         }
+        return versions.single()
     }
 
     @Synchronized

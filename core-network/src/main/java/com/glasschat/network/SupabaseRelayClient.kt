@@ -91,6 +91,25 @@ class SupabaseRelayClient(baseUrl: String, anonKey: String) {
             ?: error("Server group roster returned an invalid response")
     }
 
+    fun listGroupInvites(token: String, groupId: String): JSONArray {
+        requireUuid(groupId)
+        return rpc(token, "gc_list_group_invites", JSONObject().put("p_group_id", groupId)) as? JSONArray
+            ?: error("Server group invitations returned an invalid response")
+    }
+
+    fun removeGroupMember(token: String, groupId: String, accountId: String): Boolean {
+        requireUuid(groupId); requireUuid(accountId)
+        return rpc(token, "gc_remove_group_member", JSONObject()
+            .put("p_group_id", groupId).put("p_target_account_id", accountId)) as? Boolean
+            ?: error("Group member removal returned an invalid response")
+    }
+
+    fun revokeGroupInvite(token: String, inviteId: String): Boolean {
+        requireUuid(inviteId)
+        return rpc(token, "gc_revoke_group_invite", JSONObject().put("p_invite_id", inviteId)) as? Boolean
+            ?: error("Group invitation revocation returned an invalid response")
+    }
+
     /** Server-authoritative account/device administration; RPCs enforce the active Owner role. */
     fun ownerListAccounts(token: String): JSONArray =
         rpc(token, "gc_owner_list_accounts", JSONObject()) as? JSONArray
@@ -232,12 +251,15 @@ class SupabaseRelayClient(baseUrl: String, anonKey: String) {
             ?: error("Ciphertext fetch RPC returned an invalid response")
     }
 
-    fun submitGroupCiphertext(token: String, deliveryId: String, groupId: String, senderDeviceId: String,
-                              recipientDeviceId: String, ciphertext: ByteArray, expiresAtIso: String): String {
-        requireUuid(deliveryId); requireUuid(groupId); requireUuid(senderDeviceId); requireUuid(recipientDeviceId)
+    fun submitGroupCiphertext(token: String, deliveryId: String, groupId: String, membershipVersion: Long,
+                              senderDeviceId: String, recipientDeviceId: String,
+                              ciphertext: ByteArray, expiresAtIso: String): String {
+        requireUuid(deliveryId); requireUuid(groupId); require(membershipVersion > 0)
+        requireUuid(senderDeviceId); requireUuid(recipientDeviceId)
         require(ciphertext.isNotEmpty() && ciphertext.size <= 1_048_586)
-        return scalarText(rpc(token, "gc_submit_group_ciphertext", JSONObject()
+        return scalarText(rpc(token, "gc_submit_group_ciphertext_v2", JSONObject()
             .put("p_delivery_id", deliveryId).put("p_group_id", groupId)
+            .put("p_membership_version", membershipVersion)
             .put("p_sender_device_id", senderDeviceId).put("p_recipient_device_id", recipientDeviceId)
             .put("p_ciphertext", pgBytea(ciphertext)).put("p_expires_at", expiresAtIso)))
     }

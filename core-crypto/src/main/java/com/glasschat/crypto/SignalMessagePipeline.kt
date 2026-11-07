@@ -201,6 +201,7 @@ class SignalMessagePipeline(
         plaintext: String,
         conversationId: String,
         serverGroupId: String? = null,
+        serverGroupMembershipVersion: Long? = null,
         now: Long = System.currentTimeMillis()
     ): List<QueuedSignalDelivery> {
         require(authenticatedLocalTransportDeviceId.isNotBlank())
@@ -214,6 +215,7 @@ class SignalMessagePipeline(
         }) { "Every recipient must be a verified device linked to this conversation" }
         require(conversationId.isNotBlank() && plaintext.isNotBlank())
         require(serverGroupId == null || serverGroupId == conversationId) { "Server group ID must match this conversation" }
+        require((serverGroupId == null) == (serverGroupMembershipVersion == null)) { "Server-group ciphertext must retain its roster version" }
         val cleartext = plaintext.toByteArray(StandardCharsets.UTF_8)
         val messageId = java.util.UUID.randomUUID().toString()
         val expiresAt = now + MAX_RELAY_RETENTION_MS
@@ -234,7 +236,7 @@ class SignalMessagePipeline(
                     val encoded = SignalCiphertextEnvelopeCodec.encode(envelope)
                     try {
                         localStore.queueCiphertext(CiphertextDelivery(deliveryId,
-                            authenticatedLocalTransportDeviceId, target.transportDeviceId, encoded, expiresAt, serverGroupId), now)
+                            authenticatedLocalTransportDeviceId, target.transportDeviceId, encoded, expiresAt, serverGroupId, serverGroupMembershipVersion), now)
                         localStore.put("device", fanoutMappingId(deliveryId), JSONObject()
                             .put("fanoutMessageId", messageId).put("deliveryId", deliveryId)
                             .put("recipientTransportDeviceId", target.transportDeviceId), createdAt = now)

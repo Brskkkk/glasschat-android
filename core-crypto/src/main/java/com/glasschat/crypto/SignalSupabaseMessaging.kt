@@ -110,10 +110,12 @@ class SignalSupabaseMessaging(
         conversationId: String,
         text: String,
         serverGroupId: String? = null,
+        serverGroupMembershipVersion: Long? = null,
         now: Long = System.currentTimeMillis()
     ): List<SecureSendResult> {
         require(recipients.isNotEmpty())
         require(recipients.all { it.peer.conversationId == conversationId })
+        require((serverGroupId == null) == (serverGroupMembershipVersion == null))
         val queued = pipeline.encryptAndQueueFanout(
             localAccountId = localAccountId,
             localSignalDeviceId = localSignalDeviceId,
@@ -122,12 +124,13 @@ class SignalSupabaseMessaging(
             plaintext = text,
             conversationId = conversationId,
             serverGroupId = serverGroupId,
+            serverGroupMembershipVersion = serverGroupMembershipVersion,
             now = now
         )
         return queued.map { delivery ->
             var confirmed = false
             try {
-                submit(delivery.deliveryId, delivery.recipientDeviceId, delivery.ciphertext, delivery.expiresAt, serverGroupId)
+                submit(delivery.deliveryId, delivery.recipientDeviceId, delivery.ciphertext, delivery.expiresAt, serverGroupId, serverGroupMembershipVersion)
                 confirmed = true
                 pipeline.markRelayAccepted(delivery.deliveryId, delivery.recipientDeviceId)
                 SecureSendResult(delivery.deliveryId, SendState.RELAY_ACCEPTED_RECIPIENT_NOT_CONFIRMED,
@@ -148,7 +151,7 @@ class SignalSupabaseMessaging(
         for (delivery in localStore.pendingCiphertext(now)) {
             var relayConfirmed = false
             try {
-                submit(delivery.deliveryId, delivery.recipientDeviceId, delivery.ciphertext, delivery.expiresAt, delivery.groupId)
+                submit(delivery.deliveryId, delivery.recipientDeviceId, delivery.ciphertext, delivery.expiresAt, delivery.groupId, delivery.groupMembershipVersion)
                 relayConfirmed = true
                 pipeline.markRelayAccepted(delivery.deliveryId, delivery.recipientDeviceId)
                 result += SecureSendResult(delivery.deliveryId, SendState.RELAY_ACCEPTED_RECIPIENT_NOT_CONFIRMED,
@@ -266,14 +269,21 @@ class SignalSupabaseMessaging(
         return SecureReceiveResult(stored, newlyStored, acknowledged, skipped, failures)
     }
 
-    private fun submit(deliveryId: String, recipientDeviceId: String, ciphertext: ByteArray, expiresAt: Long, groupId: String? = null) {
+    private fun submit(
+        deliveryId: String, recipientDeviceId: String, ciphertext: ByteArray, expiresAt: Long,
+        groupId: String? = null, groupMembershipVersion: Long? = null
+    ) {
+        require((groupId == null) == (groupMembershipVersion == null)) {
+            "A server-group delivery without its saved roster version stays queued locally"
+        }
         val token = accessToken()
         val expiry = Instant.ofEpochMilli(expiresAt).toString()
         val response = if (groupId == null) relay.submitCiphertext(
             token = token, deliveryId = deliveryId, senderDeviceId = localTransportDeviceId,
             recipientDeviceId = recipientDeviceId, ciphertext = ciphertext, expiresAtIso = expiry
         ) else relay.submitGroupCiphertext(
-            token = token, deliveryId = deliveryId, groupId = groupId, senderDeviceId = localTransportDeviceId,
+            token = token, deliveryId = deliveryId, groupId = groupId,
+            membershipVersion = requireNotNull(groupMembershipVersion), senderDeviceId = localTransportDeviceId,
             recipientDeviceId = recipientDeviceId, ciphertext = ciphertext, expiresAtIso = expiry
         )
         check(response == deliveryId) { "Relay did not confirm the requested delivery ID" }

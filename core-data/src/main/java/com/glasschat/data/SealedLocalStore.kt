@@ -251,7 +251,8 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
                     existing.optString("recipientDeviceId") == envelope.recipientDeviceId &&
                     existing.optString("ciphertext") == encoded &&
                     existing.optLong("expiresAt") == envelope.expiresAt &&
-                    existing.optString("groupId").takeIf { it.isNotBlank() && it != "null" } == envelope.groupId
+                    existing.optString("groupId").takeIf { it.isNotBlank() && it != "null" } == envelope.groupId &&
+                    existing.optLong("groupMembershipVersion", -1L).takeIf { it >= 0 } == envelope.groupMembershipVersion
                 check(same) { "Delivery ID already exists with different envelope data" }
                 return // Idempotent retry; preserve the original expiry and payload.
             }
@@ -262,6 +263,7 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
                 .put("ciphertext", encoded)
                 .put("expiresAt", envelope.expiresAt)
                 .put("groupId", envelope.groupId)
+                .put("groupMembershipVersion", envelope.groupMembershipVersion)
             put("relay_delivery", rowId, value, createdAt = now)
         }
     }
@@ -278,7 +280,8 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
                     recipientDeviceId = row.getString("recipientDeviceId"),
                     ciphertext = Base64.getDecoder().decode(row.getString("ciphertext")),
                     expiresAt = row.getLong("expiresAt"),
-                    groupId = row.optString("groupId").takeIf { it.isNotBlank() && it != "null" }
+                    groupId = row.optString("groupId").takeIf { it.isNotBlank() && it != "null" },
+                        groupMembershipVersion = row.optLong("groupMembershipVersion", -1L).takeIf { it >= 0 }
                 ) }.toList()
         }
     }
@@ -297,7 +300,8 @@ class SealedLocalStore(context: Context) : SQLiteOpenHelper(
                         recipientDeviceId = row.getString("recipientDeviceId"),
                         ciphertext = Base64.getDecoder().decode(row.getString("ciphertext")),
                         expiresAt = row.getLong("expiresAt"),
-                        groupId = row.optString("groupId").takeIf { it.isNotBlank() && it != "null" }
+                        groupId = row.optString("groupId").takeIf { it.isNotBlank() && it != "null" },
+                        groupMembershipVersion = row.optLong("groupMembershipVersion", -1L).takeIf { it >= 0 }
                     )
                 }.toList()
         }
