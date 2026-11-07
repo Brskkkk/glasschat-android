@@ -16,6 +16,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -26,9 +27,6 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-
-private val ChatInk = Color(0xFF10111D)
-private val ChatAccent = Color(0xFF87D8CB)
 
 /** Local-device messaging workspace. It deliberately makes no network/E2EE delivery claim. */
 @Composable
@@ -59,6 +57,8 @@ fun LocalMessengerScreen(
     var searchInput by remember { mutableStateOf("") }
     val searchHits = remember { mutableStateListOf<JSONObject>() }
     var notice by remember { mutableStateOf("") }
+    var themeId by remember { mutableStateOf("liquid") }
+    val theme = glassTheme(themeId)
 
     fun refreshContacts() {
         executor.execute {
@@ -101,7 +101,14 @@ fun LocalMessengerScreen(
         }
     }
 
-    LaunchedEffect(Unit) { refreshChats(null); refreshContacts() }
+    LaunchedEffect(Unit) {
+        refreshChats(null)
+        refreshContacts()
+        executor.execute {
+            val savedTheme = try { store.get("setting", "theme")?.optString("id") } catch (_: Exception) { null }
+            if (!savedTheme.isNullOrBlank()) main.post { themeId = savedTheme }
+        }
+    }
     LaunchedEffect(selectedId, messageInput, editingMessageId) {
         val conversationId = selectedId
         if (conversationId != null && editingMessageId == null) {
@@ -117,18 +124,40 @@ fun LocalMessengerScreen(
         onDispose { executor.shutdown(); store.close() }
     }
 
-    Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Color(0xFF182C3D), ChatInk, Color(0xFF30213D))))) {
+    Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(theme.backgroundTop, theme.backgroundMiddle, theme.backgroundBottom)))) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(18.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
             ChatText("GLASSCHAT  ${if (owner) "OWNER" else "CLIENT"}", Color.White, 13, FontWeight.Bold)
             ChatText("Your private space", Color.White, 28, FontWeight.SemiBold)
             Panel {
-                ChatText("LOCAL-ONLY FOUNDATION", ChatAccent, 11, FontWeight.Bold)
+                ChatText("LOCAL-ONLY FOUNDATION", theme.accent, 11, FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
                 ChatText("Messages and contact records are saved encrypted on this device. This build does not send messages or implement end-to-end encryption; nothing reaches another person yet.", Color(0xFFE8E9F0), 14)
             }
+            Panel {
+                ChatText("THEME STUDIO", Color.White, 16, FontWeight.SemiBold)
+                Spacer(Modifier.height(5.dp))
+                ChatText("Choose a local look for this device.", Color(0xFFBFC4D0), 12)
+                Spacer(Modifier.height(8.dp))
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    glassThemePresets.forEach { preset ->
+                        Box(
+                            Modifier.background(preset.swatch, RoundedCornerShape(14.dp))
+                                .border(if (preset.id == themeId) 2.dp else 1.dp, if (preset.id == themeId) Color.White else Color(0x55FFFFFF), RoundedCornerShape(14.dp))
+                                .clickable {
+                                    themeId = preset.id
+                                    executor.execute {
+                                        try { store.put("setting", "theme", JSONObject().put("id", preset.id)) }
+                                        catch (e: Exception) { main.post { notice = "Could not save theme: ${e.message ?: "storage error"}" } }
+                                    }
+                                }
+                                .padding(horizontal = 12.dp, vertical = 10.dp)
+                        ) { ChatText(preset.label, Color.White, 12, FontWeight.Medium) }
+                    }
+                }
+            }
             if (owner) Panel {
                 ChatText("OWNER SERVICE", Color.White, 17, FontWeight.SemiBold)
-                Spacer(Modifier.height(6.dp)); ChatText(ownerServiceStatus, ChatAccent, 13)
+                Spacer(Modifier.height(6.dp)); ChatText(ownerServiceStatus, theme.accent, 13)
                 Spacer(Modifier.height(4.dp)); ChatText("The foreground-service lifecycle is present, but no API, relay, registration authority or gateway is connected.", Color(0xFFBFC4D0), 13)
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -219,7 +248,7 @@ fun LocalMessengerScreen(
             if (selectedId != null) Panel {
                 val selectedConversation = conversations.firstOrNull { it.optString("id") == selectedId }
                 ChatText(selectedName, Color.White, 17, FontWeight.SemiBold)
-                Spacer(Modifier.height(5.dp)); ChatText("Stored locally · not sent", ChatAccent, 12)
+                Spacer(Modifier.height(5.dp)); ChatText("Stored locally · not sent", theme.accent, 12)
                 Spacer(Modifier.height(7.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf("pinned" to "Pin", "archived" to "Archive", "muted" to "Mute").forEach { (flag, label) ->
@@ -241,7 +270,7 @@ fun LocalMessengerScreen(
                     val messageId = item.optString("id")
                     Spacer(Modifier.height(8.dp))
                     Panel {
-                        ChatText(item.optString("sender", "You"), ChatAccent, 11, FontWeight.SemiBold)
+                        ChatText(item.optString("sender", "You"), theme.accent, 11, FontWeight.SemiBold)
                         Spacer(Modifier.height(3.dp))
                         ChatText(item.optString("text"), Color(0xFFE8E9F0), 14)
                         Spacer(Modifier.height(7.dp))

@@ -5,7 +5,7 @@ This is a source inspection report, not a release. The project has not been buil
 | Area | Current state |
 |---|---|
 | Independent Owner and Client packages | Gradle modules and distinct application IDs are present in source; not build-verified. |
-| Local conversation/contact/message UI | Local creation, message save/search, local-only message edit/delete, a local reaction, local bookmarks, autosaved conversation drafts, pin/archive/mute controls, local contact nickname editing and local contact removal exist in source. Ordinary contact nicknames stay on this device and are not uploaded. These are local-device changes only and do not sync. No remote contact lookup or transmission. |
+| Local conversation/contact/message UI | Local creation, message save/search, local-only message edit/delete, a local reaction, local bookmarks, autosaved conversation drafts, pin/archive/mute controls, private local contact nicknames and local removal exist in source. No remote contact lookup or transmission. |
 | Local data protection | Payload JSON uses AES-GCM with an Android Keystore key. The current source binds ciphertext to record identity and routing metadata as associated data, and includes a v1-to-v2 in-place migration intended to preserve existing encrypted rows; neither behavior has been build- or migration-tested. SQLite routing/index metadata remains visible. This is not SQLCipher/full-database encryption and not E2EE. No recovery/backup UI. |
 | Ciphertext delivery storage primitives | Per-recipient-device queue storage, no-delete-on-fetch, device-matched ack and max seven-day expiry methods exist in source. No HTTP/API integration, caller authentication, real client-side durable commit, notification, or actual relay service. |
 | Local account-registry primitives | Digest-only one-time invitation records, transactional local UUID account creation, account status changes, and local per-device public-key/FCM-token records and revocation exist in source. These are local storage helpers only; no complete registration UI, authenticated remote registration server or server-side permission enforcement. |
@@ -13,9 +13,10 @@ This is a source inspection report, not a release. The project has not been buil
 | End-to-end encryption | Not implemented. No reviewed Signal-compatible library is integrated; local AES-GCM protects records at rest only. |
 | Authentication, network APIs and relay | Not implemented. No authenticated account service, HTTPS/WebSocket API, reachable public endpoint or temporary relay is wired up. |
 | FCM | Not integrated. No Firebase project configuration or real token delivery path. |
-| Remaining requested messenger/Owner features | Groups, real contact requests, message transport/delivery receipts, attachments, voice/media pipeline, full notifications, Theme Studio, owner administration UI, backup/recovery and broad security/reliability coverage remain incomplete. |
+| Themes | A source-only local picker has the eight named color presets and persists the selection in the encrypted local record store. It has no custom live editor, animation/refraction tuning or performance adaptation, and is not build-verified. |
+| Remaining requested messenger/Owner features | Groups, real contact requests, message transport/delivery receipts, attachments, voice/media pipeline, full notifications, custom Theme Studio editing, owner administration UI, backup/recovery and broad security/reliability coverage remain incomplete. |
 | Build, tests and APKs | Not run or produced in this work. User requested no packaging until full implementation and stability checks. |
-| Repository | Current WIP is pushed to the existing private `glasschat-android` repository; latest commit `cbe5e78`. |
+| Repository | WIP source changes are being kept in the existing private `glasschat-android` repository; consult its `main` history for the latest commit. |
 
 ## Reachability constraint
 
