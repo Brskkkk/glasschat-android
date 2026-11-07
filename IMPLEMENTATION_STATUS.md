@@ -15,7 +15,7 @@ This is a source inspection report, not a release. The project has not been buil
 | FCM | Not integrated. No Firebase project configuration or real token delivery path. |
 | Remaining requested messenger/Owner features | Groups, real contact requests, message transport/delivery receipts, attachments, voice/media pipeline, full notifications, Theme Studio, owner administration UI, backup/recovery and broad security/reliability coverage remain incomplete. |
 | Build, tests and APKs | Not run or produced in this work. User requested no packaging until full implementation and stability checks. |
-| Repository | Existing private `glasschat-android` repository; current WIP commit from Main is already pushed. New unverified local edits are not yet committed or pushed. |
+| Repository | Current WIP is pushed to the existing private `glasschat-android` repository; latest commit `cbe5e78`. |
 
 ## Reachability constraint
 
