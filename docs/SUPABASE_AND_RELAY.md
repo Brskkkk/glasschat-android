@@ -10,7 +10,7 @@ No Supabase project URL, public client key, or credentials were supplied, so nei
 
 ## Relay contract (not yet running)
 
-The Owner-side queue already stores one opaque encrypted delivery copy per recipient device, leaves it queued on fetch, acknowledges only the matching recipient device, and enforces a seven-day maximum expiry. That is local persistence logic, not a network relay. It is not yet connected to an authenticated API or a recipient's durable-store acknowledgment.
+The Owner-side queue already stores one opaque encrypted delivery copy per recipient device, leaves it queued on fetch, acknowledges only the matching recipient device, and enforces a seven-day maximum expiry. That is local persistence logic, not a network relay. `SignalMessagePipeline` now encrypts text through an established pinned Signal session before storing a versioned ciphertext envelope and includes a receive helper that checks authenticated device mappings, rejects expired copies, decrypts and stores locally. This helper is not wired to the app or network; it is not yet connected to an authenticated API or a recipient's durable-store acknowledgment. Its session ratchet update and local message write are not one transaction, so the transport must not acknowledge until durable message storage succeeds and must handle replay/retry safely.
 
 The network API still needs implementation with these boundaries:
 
