@@ -40,7 +40,8 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * Kyber records stored through [storeKyberPreKey] are one-time; use
  * [storeLastResortKyberPreKey] for a persistent last-resort record so Signal's reuse-tuple check
- * is enforced. Key publication and rotation are still not app-wired.
+ * is enforced. The store can stage monotonic signed-prekey/Kyber rotations locally; publication
+ * and retry handling belong to the authenticated runtime.
  */
 class SealedSignalProtocolStore(
     private val localStore: SealedLocalStore,
@@ -109,15 +110,29 @@ class SealedSignalProtocolStore(
                     )
                 } finally { signature.fill(0) }
             }
+            val createdAt = System.currentTimeMillis()
             writeJson(INITIAL_KEYS_READY, SINGLETON_KEY, JSONObject()
                 .put("deviceId", signalDeviceId)
                 .put("oneTimeCount", INITIAL_ONE_TIME_PREKEY_COUNT)
-                .put("createdAt", System.currentTimeMillis()))
+                .put("createdAt", createdAt)
+                .put("currentSignedPreKeyId", INITIAL_SIGNED_PREKEY_ID)
+                .put("currentKyberPreKeyId", INITIAL_KYBER_PREKEY_ID)
+                .put("rotatedAt", createdAt)
+                .put("rotationPending", false))
         }
 
+        val manifest = localStore.get(RECORD_KIND, rowId(INITIAL_KEYS_READY, SINGLETON_KEY))
+            ?.let { decodePayload(it, INITIAL_KEYS_READY, SINGLETON_KEY) }
+            ?: error("Signal pre-key manifest disappeared")
+        val signedId = manifest.optInt("currentSignedPreKeyId", INITIAL_SIGNED_PREKEY_ID)
+        val kyberId = manifest.optInt("currentKyberPreKeyId", INITIAL_KYBER_PREKEY_ID)
+        check(signedId > 0 && kyberId > 0) { "Saved current Signal pre-key IDs are invalid" }
+        check(containsSignedPreKey(signedId) && containsKyberPreKey(kyberId)) {
+            "Saved current Signal pre-key material is missing; refusing to recreate it under an existing ID"
+        }
         val identity = getIdentityKeyPair()
-        val signed = loadSignedPreKey(INITIAL_SIGNED_PREKEY_ID)
-        val kyber = loadKyberPreKey(INITIAL_KYBER_PREKEY_ID)
+        val signed = loadSignedPreKey(signedId)
+        val kyber = loadKyberPreKey(kyberId)
         val signedPublic = signed.keyPair.publicKey.serialize()
         val signedSignature = signed.signature
         val kyberPublic = kyber.keyPair.publicKey.serialize()
@@ -127,8 +142,8 @@ class SealedSignalProtocolStore(
                 registrationId = getLocalRegistrationId(),
                 deviceId = signalDeviceId,
                 identityKey = identity.publicKey.serialize(),
-                signedPreKey = SignalPublicKeyMaterial(INITIAL_SIGNED_PREKEY_ID, signedPublic, signedSignature),
-                kyberLastResortPreKey = SignalPublicKeyMaterial(INITIAL_KYBER_PREKEY_ID, kyberPublic, kyberSignature),
+                signedPreKey = SignalPublicKeyMaterial(signedId, signedPublic, signedSignature),
+                kyberLastResortPreKey = SignalPublicKeyMaterial(kyberId, kyberPublic, kyberSignature),
                 oneTimePreKeys = (1..INITIAL_ONE_TIME_PREKEY_COUNT).mapNotNull { id ->
                     if (!containsPreKey(id)) return@mapNotNull null
                     val public = loadPreKey(id).keyPair.publicKey.serialize()
@@ -140,6 +155,99 @@ class SealedSignalProtocolStore(
             signedSignature.fill(0)
             kyberPublic.fill(0)
             kyberSignature.fill(0)
+        }
+    }
+
+    /**
+     * Stage a new signed EC and last-resort Kyber pair after 30 days, or return the same pending
+     * pair after an interrupted/uncertain publication. IDs and private records are committed
+     * together before public material leaves this store. Old private records are deliberately kept
+     * so a peer holding an in-flight old bundle can still complete session setup.
+     */
+    fun provisionRotatedPublicPreKeysIfDue(
+        signalDeviceId: Int,
+        nowMillis: Long = System.currentTimeMillis()
+    ): SignalPublicPreKeyBundle? = synchronized(lock) {
+        require(signalDeviceId in MIN_SIGNAL_DEVICE_ID..MAX_SIGNAL_DEVICE_ID)
+        provisionInitialPublicPreKeys(signalDeviceId)
+        val rowId = rowId(INITIAL_KEYS_READY, SINGLETON_KEY)
+        val saved = localStore.get(RECORD_KIND, rowId) ?: error("Signal pre-key manifest disappeared")
+        val manifest = decodePayload(saved, INITIAL_KEYS_READY, SINGLETON_KEY)
+        check(manifest.optInt("deviceId") == signalDeviceId) { "Signal identity is bound to a different device ID" }
+        val rotatedAt = manifest.optLong("rotatedAt", manifest.optLong("createdAt", 0L))
+        check(rotatedAt > 0L) { "Saved Signal key rotation timestamp is invalid" }
+        val pending = manifest.optBoolean("rotationPending", false)
+        if (!pending && (nowMillis < rotatedAt || nowMillis - rotatedAt < KEY_ROTATION_INTERVAL_MS)) {
+            return@synchronized null
+        }
+
+        if (!pending) {
+            val sequenceRowId = rowId(ROTATING_PREKEY_SEQUENCE, SINGLETON_KEY)
+            val sequenceRecord = localStore.get(RECORD_KIND, sequenceRowId)
+            val highWater = if (sequenceRecord == null) {
+                INITIAL_SIGNED_PREKEY_ID
+            } else {
+                val sequence = decodePayload(sequenceRecord, ROTATING_PREKEY_SEQUENCE, SINGLETON_KEY)
+                check(sequence.optInt("deviceId") == signalDeviceId) { "Rotating key sequence belongs to a different device" }
+                sequence.getInt("highWatermark")
+            }
+            check(highWater >= INITIAL_SIGNED_PREKEY_ID && highWater < Int.MAX_VALUE) {
+                "Signal rotating pre-key ID space is exhausted or invalid"
+            }
+            val newId = highWater + 1
+            check(!containsSignedPreKey(newId) && !containsKyberPreKey(newId)) {
+                "Refusing to reuse an existing rotating Signal pre-key ID"
+            }
+            val identity = getIdentityKeyPair()
+            val ecPair = ECKeyPair.generate()
+            val kyberPair = KEMKeyPair.generate(KEMKeyType.KYBER_1024)
+            val signedPublic = ecPair.publicKey.serialize()
+            val signedSignature = try { identity.privateKey.calculateSignature(signedPublic) }
+            finally { signedPublic.fill(0) }
+            val kyberPublic = kyberPair.publicKey.serialize()
+            val kyberSignature = try { identity.privateKey.calculateSignature(kyberPublic) }
+            finally { kyberPublic.fill(0) }
+            try {
+                localStore.inTransaction {
+                    writeJson(ROTATING_PREKEY_SEQUENCE, SINGLETON_KEY,
+                        JSONObject().put("deviceId", signalDeviceId).put("highWatermark", newId))
+                    storeSignedPreKey(newId, SignedPreKeyRecord(newId, nowMillis, ecPair, signedSignature))
+                    storeLastResortKyberPreKey(newId,
+                        KyberPreKeyRecord(newId, nowMillis, kyberPair, kyberSignature))
+                    val next = JSONObject(manifest.toString())
+                        .put("currentSignedPreKeyId", newId)
+                        .put("currentKyberPreKeyId", newId)
+                        .put("rotatedAt", nowMillis)
+                        .put("rotationPending", true)
+                    writeJson(INITIAL_KEYS_READY, SINGLETON_KEY, next)
+                }
+            } finally {
+                signedSignature.fill(0)
+                kyberSignature.fill(0)
+            }
+        }
+        provisionInitialPublicPreKeys(signalDeviceId)
+    }
+
+    /** Mark the current signed/Kyber pair published only after the authenticated upsert succeeds. */
+    fun markCurrentPublicPreKeysPublished(
+        signalDeviceId: Int,
+        signedPreKeyId: Int,
+        kyberPreKeyId: Int,
+        publishedAtMillis: Long = System.currentTimeMillis()
+    ) = synchronized(lock) {
+        val rowId = rowId(INITIAL_KEYS_READY, SINGLETON_KEY)
+        val saved = localStore.get(RECORD_KIND, rowId) ?: error("Signal pre-key manifest is missing")
+        val manifest = decodePayload(saved, INITIAL_KEYS_READY, SINGLETON_KEY)
+        check(manifest.optInt("deviceId") == signalDeviceId &&
+            manifest.optInt("currentSignedPreKeyId", INITIAL_SIGNED_PREKEY_ID) == signedPreKeyId &&
+            manifest.optInt("currentKyberPreKeyId", INITIAL_KYBER_PREKEY_ID) == kyberPreKeyId) {
+            "Published Signal pre-key pair no longer matches the active device manifest"
+        }
+        if (manifest.optBoolean("rotationPending", false)) {
+            val updated = JSONObject(manifest.toString()).put("rotationPending", false)
+                .put("publishedAt", publishedAtMillis)
+            writeJson(INITIAL_KEYS_READY, SINGLETON_KEY, updated)
         }
     }
 
@@ -577,6 +685,8 @@ class SealedSignalProtocolStore(
         const val INITIAL_ONE_TIME_PREKEY_COUNT = 100
         const val MAX_ONE_TIME_PREKEY_BATCH = 100
         const val ONE_TIME_PREKEY_SEQUENCE = "one_time_prekey_sequence"
+        const val ROTATING_PREKEY_SEQUENCE = "rotating_prekey_sequence"
+        const val KEY_ROTATION_INTERVAL_MS = 30L * 24 * 60 * 60 * 1000
         const val INITIAL_SIGNED_PREKEY_ID = 1
         const val INITIAL_KYBER_PREKEY_ID = 1
         const val MIN_SIGNAL_DEVICE_ID = 1

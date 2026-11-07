@@ -23,6 +23,9 @@ class SecureSyncWorker(context: Context, params: WorkerParameters) : Worker(cont
         val store = try { SealedLocalStore(applicationContext) } catch (_: Exception) { return Result.failure() }
         return try {
             val runtime = GlassChatSecureRuntime(store)
+            // Key rotation is independent maintenance: a transient publication failure must not
+            // suppress this cycle's encrypted inbox/outbox sync.
+            try { runtime.rotatePublishedPreKeysIfDue() } catch (_: Exception) { }
             runtime.retryQueued()
             val newlyStored = runtime.receiveForBackground()
             SecureMessageNotifications.showNewMessages(applicationContext, newlyStored)

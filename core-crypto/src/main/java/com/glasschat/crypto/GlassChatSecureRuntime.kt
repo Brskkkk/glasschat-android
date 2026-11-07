@@ -104,7 +104,8 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
 
         val localRecord = requireNotNull(saved)
         val protocol = SealedSignalProtocolStore(store, accountId)
-        val public = protocol.provisionInitialPublicPreKeys(signalDeviceId)
+        val public = protocol.provisionRotatedPublicPreKeysIfDue(signalDeviceId)
+            ?: protocol.provisionInitialPublicPreKeys(signalDeviceId)
         val identity = public.identityKey
         try {
             val existing = (0 until registered.length()).mapNotNull { registered.optJSONObject(it) }
@@ -129,6 +130,8 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
             try {
                 client.publishSignedAndKyberPreKeys(token, accountId, transportId,
                     public.signedPreKey.id, signed, signedSig, public.kyberLastResortPreKey.id, kyber, kyberSig)
+                protocol.markCurrentPublicPreKeysPublished(signalDeviceId,
+                    public.signedPreKey.id, public.kyberLastResortPreKey.id)
             } finally { signed.fill(0); signedSig.fill(0); kyber.fill(0); kyberSig.fill(0) }
 
             val publicationId = "otpk:${accountId}:$transportId"
@@ -152,6 +155,44 @@ class GlassChatSecureRuntime(private val store: SealedLocalStore) {
                 .put("registrationId", public.registrationId).put("identityFingerprint", fingerprint(identity)))
             return "This device is registered and its public Signal keys are published. Private keys remain on this device."
         } finally { identity.fill(0) }
+    }
+
+    /** Best-effort worker hook: rotate and republish only this registered device's public keys. */
+    @Synchronized
+    fun rotatePublishedPreKeysIfDue(): Boolean {
+        val account = requireAccount()
+        val accountId = account.getString("id")
+        val local = requireLocalDevice(accountId)
+        check(local.optBoolean("registered")) { "This device is not registered yet" }
+        val transportId = local.getString("transportId")
+        val signalDeviceId = local.getInt("signalDeviceId")
+        val client = relay()
+        val token = accessToken()
+        val registered = client.listOwnDevices(token, accountId)
+        val row = (0 until registered.length()).mapNotNull { registered.optJSONObject(it) }
+            .firstOrNull { it.optString("id") == transportId && it.optInt("signal_device_id") == signalDeviceId }
+            ?: error("The registered Signal device is no longer visible; refusing key publication")
+        val protocol = SealedSignalProtocolStore(store, accountId)
+        val identity = protocol.getIdentityKeyPair().publicKey.serialize()
+        val remoteIdentity = client.decodePgBytea(row.getString("public_identity_key"))
+        try {
+            check(identity.contentEquals(remoteIdentity)) {
+                "Server device identity differs from this device's saved Signal identity; refusing key rotation"
+            }
+        } finally { identity.fill(0); remoteIdentity.fill(0) }
+
+        val public = protocol.provisionRotatedPublicPreKeysIfDue(signalDeviceId) ?: return false
+        val signed = public.signedPreKey.publicKey
+        val signedSig = public.signedPreKey.signature ?: error("Signed pre-key signature is missing")
+        val kyber = public.kyberLastResortPreKey.publicKey
+        val kyberSig = public.kyberLastResortPreKey.signature ?: error("Kyber pre-key signature is missing")
+        try {
+            client.publishSignedAndKyberPreKeys(token, accountId, transportId,
+                public.signedPreKey.id, signed, signedSig, public.kyberLastResortPreKey.id, kyber, kyberSig)
+            protocol.markCurrentPublicPreKeysPublished(signalDeviceId,
+                public.signedPreKey.id, public.kyberLastResortPreKey.id)
+            return true
+        } finally { signed.fill(0); signedSig.fill(0); kyber.fill(0); kyberSig.fill(0) }
     }
 
     private fun replenishOneTimePreKeys(
