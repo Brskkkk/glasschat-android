@@ -181,6 +181,7 @@ fun LocalMessengerScreen(
                 secureState = secureStatus
                 accountSummary = account
                 hasVerifiedPeer = verified
+                if (account != null && verified) SecureSyncScheduler.start(appContext)
                 if (!savedTheme.isNullOrBlank()) themeId = savedTheme
                 if (!savedAccent.isNullOrBlank()) { customAccentHex = savedAccent; accentInput = savedAccent }
                 if (savedProfile != null) {
@@ -271,7 +272,10 @@ fun LocalMessengerScreen(
                                 val status = secureRuntime.currentState()
                                 val account = try { secureRuntime.currentAccountSummary() } catch (_: Exception) { null }
                                 val verified = secureRuntime.hasVerifiedPeers()
-                                main.post { secureState = status; accountSummary = account; hasVerifiedPeer = verified; notice = result }
+                                main.post {
+                                    secureState = status; accountSummary = account; hasVerifiedPeer = verified; notice = result
+                                    if (account != null && verified) SecureSyncScheduler.start(appContext)
+                                }
                             } catch (e: Exception) { main.post { notice = "Sign-in did not complete: ${e.message ?: "check credentials and email verification"}" } }
                         }
                     }
@@ -360,7 +364,10 @@ fun LocalMessengerScreen(
                             val result = secureRuntime.verifyPeerAndEstablishSession(peerDeviceInput, conversationId, peerFingerprintInput)
                             val status = secureRuntime.currentState(); val verified = secureRuntime.hasVerifiedPeers()
                             val peerReady = secureRuntime.hasVerifiedPeer(conversationId)
-                            main.post { secureState = status; hasVerifiedPeer = verified; selectedPeerReady = peerReady; notice = result }
+                            main.post {
+                                secureState = status; hasVerifiedPeer = verified; selectedPeerReady = peerReady; notice = result
+                                if (peerReady) SecureSyncScheduler.start(appContext)
+                            }
                         } catch (e: Exception) { main.post { notice = "Peer verification stopped safely: ${e.message ?: "compare the fingerprint and verify mutual consent"}" } }
                     }
                 }

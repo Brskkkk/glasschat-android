@@ -17,7 +17,7 @@ Status distinction matters:
 - `relay_accepted_recipient_not_confirmed`: relay accepted ciphertext; recipient receipt is not confirmed.
 - `received_encrypted_local`: decrypted message was saved on this device before relay acknowledgment.
 
-The client currently polls only when the user taps the receive control; it has no FCM, push delivery, background polling or automatic retry scheduler. The Owner foreground service is a local lifecycle shell, not the relay server.
+Once a verified peer session is configured, the shared UI schedules a connected-network immediate sync and unique 15-minute periodic WorkManager sync in both APKs. It retries queued ciphertext and polls for inbound ciphertext, decrypting and persisting before acknowledgment. Android may defer or stop this work; it is not real-time push, FCM, or an always-on Owner relay, and it does not currently show incoming-message notifications. The Owner foreground service remains a local lifecycle shell, not the relay server.
 
 ## Migrations and deployment boundary
 
